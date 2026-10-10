@@ -268,9 +268,26 @@ fn real_headless_sway_ui_persistence_and_rollback() -> Result<()> {
             .context("Wayland socket")?
             .path();
         let pointer = support::Pointer::new(&wayland_path)?;
-        sway.capture("headless-ui.png")?;
         let mut capture = layman::capture::Capturer::at(&wayland_path)?;
-        let screens = capture.screens()?;
+        // Wait for the native renderer to consume Sway's fullscreen configure.
+        // Seeing the app in the IPC tree can precede its first resized frame.
+        let started = Instant::now();
+        let screens = loop {
+            let screens = capture.screens()?;
+            if screens.iter().any(|s| {
+                s.name == "HEADLESS-1"
+                    && s.image.size == [1280, 800]
+                    && s.image.pixels[8 * 1280 + 8] == layman::theme::BG
+            }) {
+                break screens;
+            }
+            ensure!(
+                started.elapsed() < Duration::from_secs(10),
+                "Fullscreen rendering timeout"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        sway.capture("headless-ui.png")?;
         ensure!(screens.len() == 2, "Expected two real screen buffers");
         let first = screens
             .iter()
@@ -285,6 +302,24 @@ fn real_headless_sway_ui_persistence_and_rollback() -> Result<()> {
             colors.len() > 20,
             "Screen capture did not contain rendered UI pixels"
         );
+        // Exercise reuse across batches, then replacement after a mode change.
+        for _ in 0..3 {
+            let batch = capture.screens()?;
+            ensure!(batch.len() == 2, "Concurrent capture lost an output");
+            ensure!(
+                batch.iter().all(|s| s.image.size == [1280, 800]),
+                "Reused buffer changed size"
+            );
+        }
+        sway.command("output HEADLESS-2 mode 1024x768")?;
+        ensure!(
+            capture
+                .screens()?
+                .iter()
+                .any(|s| s.name == "HEADLESS-2" && s.image.size == [1024, 768]),
+            "Capture did not replace the buffer after a mode change"
+        );
+        sway.command("output HEADLESS-2 mode 1280x800")?;
         sway.command("output HEADLESS-2 disable")?;
         std::thread::sleep(Duration::from_millis(200));
         ensure!(

@@ -86,153 +86,134 @@ pub fn switch(ui: &mut egui::Ui, checked: &mut bool, label: &str) -> egui::Respo
     response.on_hover_text(label)
 }
 
+/// A consistent 24-unit vector set with rounded strokes and generous negative space.
 pub fn paint(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
-    let s = Stroke::new(1.6_f32, color);
-    let point = |x: f32, y: f32| Pos2::new(r.left() + r.width() * x, r.top() + r.height() * y);
-    let line = |a: (f32, f32), b: (f32, f32)| {
-        p.line_segment([point(a.0, a.1), point(b.0, b.1)], s);
+    let unit = r.width().min(r.height()) / 24.;
+    let origin = r.center() - Vec2::splat(unit * 12.);
+    let point = |x: f32, y: f32| origin + Vec2::new(x, y) * unit;
+    let stroke = Stroke::new(1.8 * unit, color);
+    let path = |coords: &[(f32, f32)]| {
+        let points: Vec<_> = coords.iter().map(|&(x, y)| point(x, y)).collect();
+        if let (Some(&first), Some(&last)) = (points.first(), points.last()) {
+            p.add(egui::Shape::line(points, stroke));
+            p.circle_filled(first, stroke.width / 2., color);
+            p.circle_filled(last, stroke.width / 2., color);
+        }
     };
-    let screen = |a: (f32, f32), b: (f32, f32)| {
+    let outline = |x: f32, y: f32, w: f32, h: f32| {
         p.rect_stroke(
-            Rect::from_min_max(point(a.0, a.1), point(b.0, b.1)),
+            Rect::from_min_size(point(x, y), Vec2::new(w, h) * unit),
             2.,
-            s,
-            StrokeKind::Inside,
+            stroke,
+            StrokeKind::Middle,
         );
+    };
+    let arc = |cx: f32, cy: f32, radius: f32, start: f32, end: f32| {
+        let coords: Vec<_> = (0..=32)
+            .map(|i| {
+                let a = (start + (end - start) * i as f32 / 32.).to_radians();
+                (cx + radius * a.cos(), cy + radius * a.sin())
+            })
+            .collect();
+        path(&coords);
     };
     match icon {
         Icon::Row => {
-            screen((0., 0.38), (0.38, 0.82));
-            screen((0.46, 0.14), (1., 0.82));
-            for x in [0.05, 0.25, 0.45, 0.65, 0.85] {
-                for y in [0.02, 0.98] {
-                    p.circle_filled(point(x, y), 0.8, color);
-                }
-            }
+            outline(2., 7., 8., 10.);
+            outline(14., 4., 8., 13.);
+            path(&[(6., 17.), (6., 20.)]);
+            path(&[(18., 17.), (18., 20.)]);
+            path(&[(3., 20.), (9., 20.)]);
+            path(&[(15., 20.), (21., 20.)]);
         }
         Icon::Fit => {
-            for (x, y, dx, dy) in [
-                (0.1, 0.1, 0.25, 0.25),
-                (0.9, 0.1, -0.25, 0.25),
-                (0.1, 0.9, 0.25, -0.25),
-                (0.9, 0.9, -0.25, -0.25),
-            ] {
-                line((x, y), (x + dx, y));
-                line((x, y), (x, y + dy));
-            }
+            path(&[(8., 3.), (3., 3.), (3., 8.)]);
+            path(&[(16., 3.), (21., 3.), (21., 8.)]);
+            path(&[(3., 16.), (3., 21.), (8., 21.)]);
+            path(&[(16., 21.), (21., 21.), (21., 16.)]);
         }
         Icon::Snap => {
-            line((0.5, 0.2), (0.5, 0.8));
-            line((0., 0.5), (0.3, 0.5));
-            line((0.7, 0.5), (1., 0.5));
-            for (a, b) in [
-                ((0.34, 0.2), (0.22, 0.04)),
-                ((0.66, 0.2), (0.78, 0.04)),
-                ((0.34, 0.8), (0.22, 0.96)),
-                ((0.66, 0.8), (0.78, 0.96)),
-            ] {
-                line(a, b);
-            }
+            // A magnet: recognizable even when the control is inactive.
+            path(&[(5., 10.), (5., 4.), (9., 4.), (9., 10.)]);
+            path(&[(15., 10.), (15., 4.), (19., 4.), (19., 10.)]);
+            arc(12., 13., 7., 0., 180.);
+            arc(12., 13., 3., 0., 180.);
+            path(&[(5., 10.), (5., 13.)]);
+            path(&[(9., 10.), (9., 13.)]);
+            path(&[(15., 10.), (15., 13.)]);
+            path(&[(19., 10.), (19., 13.)]);
+            path(&[(5., 9.), (9., 9.)]);
+            path(&[(15., 9.), (19., 9.)]);
         }
         Icon::Minus | Icon::Plus => {
-            line((0.2, 0.5), (0.8, 0.5));
+            path(&[(5., 12.), (19., 12.)]);
             if matches!(icon, Icon::Plus) {
-                line((0.5, 0.2), (0.5, 0.8));
+                path(&[(12., 5.), (12., 19.)]);
             }
         }
         Icon::Refresh => {
-            // Two clockwise arcs; arrowheads follow each arc's tangent.
-            for start in [-2.85_f32, 0.29] {
-                let end = start + 2.55;
-                let pts = (0..=20)
-                    .map(|i| {
-                        let a = start + i as f32 / 20. * (end - start);
-                        point(0.5 + a.cos() * 0.36, 0.5 + a.sin() * 0.36)
-                    })
-                    .collect();
-                p.add(egui::Shape::line(pts, s));
-                let tip = point(0.5 + end.cos() * 0.36, 0.5 + end.sin() * 0.36);
-                let tangent = Vec2::new(-end.sin(), end.cos());
-                let normal = Vec2::new(end.cos(), end.sin());
-                for side in [-1., 1.] {
-                    p.line_segment([tip, tip - tangent * 4.5 + normal * (side * 3.)], s);
-                }
-            }
+            arc(12., 12., 8., -150., -20.);
+            path(&[(19.5, 3.), (19.5, 9.3), (13.5, 9.3)]);
+            arc(12., 12., 8., 30., 160.);
+            path(&[(4.5, 21.), (4.5, 14.7), (10.5, 14.7)]);
         }
         Icon::Reset => {
-            line((0.1, 0.32), (0.28, 0.12));
-            line((0.1, 0.32), (0.3, 0.5));
-            line((0.1, 0.32), (0.56, 0.32));
-            let pts = (0..=20)
-                .map(|i| {
-                    let a = -std::f32::consts::FRAC_PI_2 + i as f32 / 20. * std::f32::consts::PI;
-                    point(0.56 + a.cos() * 0.28, 0.6 + a.sin() * 0.28)
-                })
-                .collect();
-            p.add(egui::Shape::line(pts, s));
-            line((0.56, 0.88), (0.3, 0.88));
+            path(&[(8., 3.), (3., 8.), (8., 13.)]);
+            path(&[(3., 8.), (14., 8.)]);
+            arc(14., 14., 6., -90., 90.);
+            path(&[(14., 20.), (9., 20.)]);
         }
         Icon::Load => {
-            p.add(egui::Shape::closed_line(
-                vec![
-                    point(0.08, 0.14),
-                    point(0.37, 0.14),
-                    point(0.48, 0.27),
-                    point(0.92, 0.27),
-                    point(0.92, 0.88),
-                    point(0.08, 0.88),
-                ],
-                s,
-            ));
-            line((0.5, 0.73), (0.5, 0.43));
-            line((0.34, 0.59), (0.5, 0.43));
-            line((0.5, 0.43), (0.66, 0.59));
+            path(&[
+                (3., 10.),
+                (3., 5.),
+                (9., 5.),
+                (12., 8.),
+                (21., 8.),
+                (21., 10.),
+            ]);
+            path(&[(3., 10.), (21., 10.), (19., 20.), (5., 20.), (3., 10.)]);
         }
-        Icon::Confirm => {
-            line((0.12, 0.51), (0.39, 0.78));
-            line((0.39, 0.78), (0.88, 0.22));
-        }
+        Icon::Confirm => path(&[(4., 12.), (9., 17.), (20., 6.)]),
         Icon::Save => {
-            p.add(egui::Shape::closed_line(
-                vec![
-                    point(0.08, 0.08),
-                    point(0.72, 0.08),
-                    point(0.92, 0.28),
-                    point(0.92, 0.92),
-                    point(0.08, 0.92),
-                ],
-                s,
-            ));
-            screen((0.28, 0.08), (0.65, 0.38));
-            screen((0.25, 0.62), (0.75, 0.92));
+            path(&[
+                (5., 3.),
+                (17., 3.),
+                (21., 7.),
+                (21., 21.),
+                (3., 21.),
+                (3., 3.),
+                (5., 3.),
+            ]);
+            path(&[(7., 3.), (7., 9.), (16., 9.), (16., 3.)]);
+            outline(7., 14., 10., 7.);
+            path(&[(13., 5.), (13., 7.)]);
         }
         Icon::Revert => {
-            line((0.2, 0.2), (0.8, 0.8));
-            line((0.8, 0.2), (0.2, 0.8));
+            path(&[(6., 6.), (18., 18.)]);
+            path(&[(18., 6.), (6., 18.)]);
         }
         Icon::Rotation(angle) => {
             let rotate = |x: f32, y: f32| {
                 let a = (angle as f32).to_radians();
-                let x = x - 0.5;
-                let y = y - 0.5;
-                point(
-                    0.5 + x * a.cos() - y * a.sin(),
-                    0.5 + x * a.sin() + y * a.cos(),
+                let (x, y) = (x - 12., y - 12.);
+                (
+                    12. + x * a.cos() - y * a.sin(),
+                    12. + x * a.sin() + y * a.cos(),
                 )
             };
-            p.add(egui::Shape::closed_line(
-                vec![
-                    rotate(0.1, 0.25),
-                    rotate(0.9, 0.25),
-                    rotate(0.9, 0.75),
-                    rotate(0.1, 0.75),
-                ],
-                s,
-            ));
-            p.line_segment(
-                [rotate(0.24, 0.59), rotate(0.38, 0.59)],
-                Stroke::new(2.4_f32, color),
-            );
+            let frame: Vec<_> = [(3., 6.), (21., 6.), (21., 18.), (3., 18.), (3., 6.)]
+                .into_iter()
+                .map(|(x, y)| rotate(x, y))
+                .collect();
+            path(&frame);
+            // The arrow identifies the top of the panel in all four orientations.
+            let arrow: Vec<_> = [(9., 12.), (12., 9.), (15., 12.)]
+                .into_iter()
+                .map(|(x, y)| rotate(x, y))
+                .collect();
+            path(&arrow);
+            path(&[rotate(12., 9.), rotate(12., 15.)]);
         }
     }
 }

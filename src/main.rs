@@ -54,6 +54,7 @@ fn run() -> Result<()> {
             .with_min_inner_size([900., 620.])
             .with_app_id("dev.layman.Layman"),
         renderer: eframe::Renderer::Glow,
+        multisampling: 4,
         ..Default::default()
     };
     eframe::run_native(

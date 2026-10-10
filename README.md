@@ -26,18 +26,21 @@ layman
 Drag monitors to match your desk. Edges snap; Alt bypasses snapping. Select a
 monitor to edit its advertised resolution/refresh and fractional scale. The scale
 control snaps to 0.25× increments, with minus/plus buttons for precise changes.
-Four orientation icons select 0°, 90°, 180°, or 270°; the Mirror checkbox flips
+Four orientation icons select 0°, 90°, 180°, or 270°; the Mirror switch flips
 horizontally.
 Arrow keys over the canvas nudge the selected monitor; Shift nudges by 10 pixels.
 Scroll over the canvas to zoom around the pointer. Drag empty canvas to pan, or
 hold Space and drag anywhere (middle-drag also works). Dragging screen pixels
-still moves that display. Labels and borders sit outside the screen image. The
-four-corner icon fits the displays to the canvas. All toolbar
+still moves that display. Labels sit outside the screen image; borders stay inside
+each display edge. The four-corner icon fits the displays to the canvas. All toolbar
 and footer icons have tooltips and keyboard focus.
 
 Each monitor shows real screen pixels, captured directly through Wayland's
 wlr-screencopy protocol and shared-memory buffers. Capture runs on a background
-thread at native resolution, targeting 30 frames per second, with bounded waits.
+thread at native resolution, targeting 60 frames per second, with bounded waits.
+All outputs are requested together and shared-memory buffers are reused between
+frames. Vector controls use antialiasing and 4× MSAA; previews use linear mipmap
+filtering to smooth reduced screen images.
 The GPU scales previews to the canvas; capture and pixel conversion use shared
 memory on the CPU. Actual refresh depends on the compositor and screen sizes.
 Capture handles rotation,

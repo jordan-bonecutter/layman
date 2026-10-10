@@ -11,7 +11,10 @@ use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
 };
 
-const COLORS: [Color32; 4] = [ACCENT, TEXT, WARN, TEXT];
+const PREVIEW_FILTER: egui::TextureOptions =
+    egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear));
+
+const COLORS: [Color32; 4] = [ACCENT, TEAL, LAVENDER, WARN];
 
 #[derive(Clone, Copy)]
 struct Drag {
@@ -62,6 +65,10 @@ impl App {
         visuals.widgets.active.bg_fill = SELECTED;
         visuals.widgets.active.weak_bg_fill = SELECTED;
         ctx.set_visuals(visuals);
+        ctx.tessellation_options_mut(|options| {
+            options.feathering = true;
+            options.feathering_size_in_pixels = 1.;
+        });
         ctx.style_mut(|s| {
             s.spacing.item_spacing = Vec2::new(10., 10.);
             s.spacing.button_padding = Vec2::new(12., 8.);
@@ -190,15 +197,11 @@ impl App {
                         self.textures.retain(|name, _| names.contains(name));
                         for screen in screens {
                             if let Some(texture) = self.textures.get_mut(&screen.name) {
-                                texture.set(screen.image, egui::TextureOptions::LINEAR);
+                                texture.set(screen.image, PREVIEW_FILTER);
                             } else {
                                 self.textures.insert(
                                     screen.name.clone(),
-                                    ctx.load_texture(
-                                        screen.name,
-                                        screen.image,
-                                        egui::TextureOptions::LINEAR,
-                                    ),
+                                    ctx.load_texture(screen.name, screen.image, PREVIEW_FILTER),
                                 );
                             }
                         }
@@ -380,10 +383,10 @@ impl App {
             .show(ctx, |ui| {
                 ui.add_enabled_ui(self.preview.is_none(), |ui| {
                     for warning in self.layout.warnings() {
-                        ui.label(RichText::new(warning).size(12.).color(COLORS[2]));
+                        ui.label(RichText::new(warning).size(12.).color(WARN));
                     }
                     if let Some(error) = &self.live_error {
-                        ui.label(RichText::new(error).size(12.).color(COLORS[2]));
+                        ui.label(RichText::new(error).size(12.).color(WARN));
                     }
                     self.canvas(ui);
                 });
@@ -558,14 +561,18 @@ impl App {
             }
         });
         ui.add_space(12.);
-        ui.label(RichText::new("Mirror").size(12.).color(MUTED));
         let mut mirrored = flipped;
-        if ui.checkbox(&mut mirrored, "Flip horizontally").changed() {
-            o.transform = transform(angle, mirrored);
-        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Mirror").size(12.).color(MUTED));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::switch(ui, &mut mirrored, "Mirror display").changed() {
+                    o.transform = transform(angle, mirrored);
+                }
+            });
+        });
         if let Err(e) = self.layout.validate() {
             ui.add_space(12.);
-            ui.label(RichText::new(e.to_string()).color(COLORS[2]));
+            ui.label(RichText::new(e.to_string()).color(WARN));
         }
     }
     fn workspaces(&mut self, ui: &mut egui::Ui) {
@@ -724,7 +731,7 @@ impl App {
             if interaction.hovered() || interaction.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
-            // Screen pixels occupy the entire logical display rect. Chrome stays outside.
+            // Keep the border inside its own display so touching monitors never cover each other.
             painter.rect_filled(r, 0., PANEL);
             if let Some(texture) = self.textures.get(&o.name) {
                 painter.image(
@@ -747,13 +754,13 @@ impl App {
                 );
             }
             painter.rect_stroke(
-                r.expand(2.),
+                r,
                 0.,
                 Stroke::new(
                     if selected { 2_f32 } else { 1_f32 },
                     if selected { color } else { LINE },
                 ),
-                StrokeKind::Outside,
+                StrokeKind::Inside,
             );
             if r.width() > 100. {
                 let label = format!("{}   {w} × {h}", o.name);

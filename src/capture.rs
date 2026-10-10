@@ -2,6 +2,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use eframe::egui::{Color32, ColorImage};
 use std::{
+    collections::HashMap,
     fs::File,
     os::{
         fd::AsFd,
@@ -31,6 +32,7 @@ struct Output {
 }
 struct Buffer {
     file: File,
+    bytes: Vec<u8>,
     proxy: wl_buffer::WlBuffer,
     width: u32,
     height: u32,
@@ -43,6 +45,10 @@ struct State {
     shm: Option<wl_shm::WlShm>,
     manager: Option<manager::ZwlrScreencopyManagerV1>,
     synced: bool,
+    frames: HashMap<String, PendingFrame>,
+}
+#[derive(Default)]
+struct PendingFrame {
     buffer: Option<Buffer>,
     done: bool,
     error: Option<String>,
@@ -113,15 +119,16 @@ impl Dispatch<wl_output::WlOutput, ()> for State {
         }
     }
 }
-impl Dispatch<frame::ZwlrScreencopyFrameV1, ()> for State {
+impl Dispatch<frame::ZwlrScreencopyFrameV1, String> for State {
     fn event(
         state: &mut Self,
         frame: &frame::ZwlrScreencopyFrameV1,
         event: frame::Event,
-        _: &(),
+        name: &String,
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
+        let pending = state.frames.get_mut(name).expect("registered capture");
         match event {
             frame::Event::Buffer {
                 format: WEnum::Value(format),
@@ -129,7 +136,7 @@ impl Dispatch<frame::ZwlrScreencopyFrameV1, ()> for State {
                 height,
                 stride,
             } => {
-                let create = || -> Result<Buffer> {
+                let mut create = || -> Result<Buffer> {
                     ensure!(
                         width > 0 && height > 0 && width <= 16384 && height <= 16384,
                         "Invalid capture size"
@@ -159,6 +166,17 @@ impl Dispatch<frame::ZwlrScreencopyFrameV1, ()> for State {
                         ),
                         "Unsupported screenshot pixel format {format:?}"
                     );
+                    if let Some(buffer) = pending.buffer.take() {
+                        if buffer.width == width
+                            && buffer.height == height
+                            && buffer.stride == stride
+                            && buffer.format == format
+                        {
+                            frame.copy(&buffer.proxy);
+                            return Ok(buffer);
+                        }
+                        buffer.proxy.destroy();
+                    }
                     let file = tempfile::tempfile()?;
                     file.set_len(bytes)?;
                     let pool = state
@@ -179,6 +197,7 @@ impl Dispatch<frame::ZwlrScreencopyFrameV1, ()> for State {
                     frame.copy(&buffer);
                     Ok(Buffer {
                         file,
+                        bytes: vec![0; bytes as usize],
                         proxy: buffer,
                         width,
                         height,
@@ -187,20 +206,20 @@ impl Dispatch<frame::ZwlrScreencopyFrameV1, ()> for State {
                     })
                 };
                 match create() {
-                    Ok(buffer) => state.buffer = Some(buffer),
+                    Ok(buffer) => pending.buffer = Some(buffer),
                     Err(e) => {
-                        state.error = Some(format!("{e:#}"));
-                        state.done = true;
+                        pending.error = Some(format!("{e:#}"));
+                        pending.done = true;
                     }
                 }
             }
             frame::Event::Flags {
                 flags: WEnum::Value(flags),
-            } => state.inverted = flags.contains(frame::Flags::YInvert),
-            frame::Event::Ready { .. } => state.done = true,
+            } => pending.inverted = flags.contains(frame::Flags::YInvert),
+            frame::Event::Ready { .. } => pending.done = true,
             frame::Event::Failed => {
-                state.done = true;
-                state.error =
+                pending.done = true;
+                pending.error =
                     Some("Screen capture unavailable (output may be powered off).".into());
             }
             _ => {}
@@ -294,44 +313,60 @@ impl Capturer {
             .filter(|o| !o.name.is_empty())
             .map(|o| (o.name.clone(), o.proxy.clone(), o.transform))
             .collect();
+        let names: std::collections::HashSet<_> = outputs.iter().map(|o| o.0.clone()).collect();
+        self.state.frames.retain(|name, pending| {
+            if names.contains(name) {
+                true
+            } else {
+                if let Some(buffer) = pending.buffer.take() {
+                    buffer.proxy.destroy();
+                }
+                false
+            }
+        });
+        // Submit every output before waiting: one compositor refresh can satisfy
+        // the entire batch instead of paying a refresh wait for each monitor.
+        let mut requests = Vec::new();
+        for (name, output, _) in &outputs {
+            let pending = self.state.frames.entry(name.clone()).or_default();
+            pending.done = false;
+            pending.error = None;
+            pending.inverted = false;
+            requests.push(self.state.manager.as_ref().unwrap().capture_output(
+                0,
+                output,
+                &self.queue.handle(),
+                name.clone(),
+            ));
+        }
+        let result = self.wait(|s| s.frames.values().all(|p| p.done));
+        for frame in requests {
+            frame.destroy();
+        }
+        result?;
         let mut screens = Vec::new();
         let mut errors = Vec::new();
-        for (name, output, transform) in outputs {
-            self.state.done = false;
-            self.state.error = None;
-            self.state.inverted = false;
-            self.state.buffer = None;
-            let frame = self.state.manager.as_ref().unwrap().capture_output(
-                0,
-                &output,
-                &self.queue.handle(),
-                (),
-            );
-            let result = self.wait(|s| s.done);
-            frame.destroy();
-            let buffer = self.state.buffer.take();
-            match result.and_then(|_| {
-                if let Some(e) = self.state.error.take() {
+        for (name, _, transform) in outputs {
+            let pending = self.state.frames.get_mut(&name).unwrap();
+            let result = (|| {
+                if let Some(e) = pending.error.take() {
                     bail!("{e}");
                 }
-                let buffer = buffer.as_ref().context("No screen buffer")?;
-                let mut bytes = vec![0; buffer.stride as usize * buffer.height as usize];
-                buffer.file.read_exact_at(&mut bytes, 0)?;
+                let buffer = pending.buffer.as_mut().context("No screen buffer")?;
+                buffer.file.read_exact_at(&mut buffer.bytes, 0)?;
                 decode_frame(
-                    &bytes,
+                    &buffer.bytes,
                     buffer.width,
                     buffer.height,
                     buffer.stride,
                     buffer.format,
-                    self.state.inverted,
+                    pending.inverted,
                     transform,
                 )
-            }) {
+            })();
+            match result {
                 Ok(image) => screens.push(Screen { name, image }),
                 Err(e) => errors.push(format!("{name}: {e:#}")),
-            }
-            if let Some(buffer) = buffer {
-                buffer.proxy.destroy();
             }
         }
         ensure!(
@@ -449,7 +484,7 @@ pub fn poll(ctx: eframe::egui::Context) -> mpsc::Receiver<Result<Vec<Screen>>> {
                 Err(mpsc::TrySendError::Full(_)) => {}
             }
             let interval = if capturer.is_some() {
-                Duration::from_secs_f64(1. / 30.)
+                Duration::from_secs_f64(1. / 60.)
             } else {
                 Duration::from_secs(1)
             };
