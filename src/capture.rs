@@ -317,7 +317,7 @@ impl Capturer {
                 let buffer = buffer.as_ref().context("No screen buffer")?;
                 let mut bytes = vec![0; buffer.stride as usize * buffer.height as usize];
                 buffer.file.read_exact_at(&mut bytes, 0)?;
-                thumbnail(
+                decode_frame(
                     &bytes,
                     buffer.width,
                     buffer.height,
@@ -348,9 +348,9 @@ impl Capturer {
 }
 
 /// Convert native-endian SHM pixels, account for output transform/row inversion,
-/// and downsample on the worker so the GUI never uploads full-resolution frames.
+/// and preserve native resolution. The GPU scales these pixels to the canvas.
 #[allow(clippy::too_many_arguments)]
-pub fn thumbnail(
+pub fn decode_frame(
     data: &[u8],
     width: u32,
     height: u32,
@@ -372,16 +372,11 @@ pub fn thumbnail(
     } else {
         (width, height)
     };
-    let ratio = (640. / tw as f32).min(450. / th as f32).min(1.);
-    let (dw, dh) = (
-        (tw as f32 * ratio).round().max(1.) as usize,
-        (th as f32 * ratio).round().max(1.) as usize,
-    );
+    let (dw, dh) = (tw as usize, th as usize);
     let mut pixels = Vec::with_capacity(dw * dh);
     for y in 0..dh {
         for x in 0..dw {
-            let ox = ((x as f32 + 0.5) * tw as f32 / dw as f32).floor() as u32;
-            let oy = ((y as f32 + 0.5) * th as f32 / dh as f32).floor() as u32;
+            let (ox, oy) = (x as u32, y as u32);
             let (mut sx, mut sy) = match transform % 4 {
                 0 => (ox, oy),
                 1 => (oy, height - 1 - ox),
@@ -438,6 +433,7 @@ pub fn poll(ctx: eframe::egui::Context) -> mpsc::Receiver<Result<Vec<Screen>>> {
     std::thread::spawn(move || {
         let mut capturer = None;
         loop {
+            let started = Instant::now();
             let result = (|| {
                 if capturer.is_none() {
                     capturer = Some(Capturer::connect()?);
@@ -452,7 +448,12 @@ pub fn poll(ctx: eframe::egui::Context) -> mpsc::Receiver<Result<Vec<Screen>>> {
                 Err(mpsc::TrySendError::Disconnected(_)) => break,
                 Err(mpsc::TrySendError::Full(_)) => {}
             }
-            std::thread::sleep(Duration::from_millis(333));
+            let interval = if capturer.is_some() {
+                Duration::from_secs_f64(1. / 30.)
+            } else {
+                Duration::from_secs(1)
+            };
+            std::thread::sleep(interval.saturating_sub(started.elapsed()));
         }
     });
     receiver

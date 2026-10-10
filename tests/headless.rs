@@ -277,7 +277,7 @@ fn real_headless_sway_ui_persistence_and_rollback() -> Result<()> {
             .find(|s| s.name == "HEADLESS-1")
             .context("First screen")?;
         ensure!(
-            first.image.size == [640, 400],
+            first.image.size == [1280, 800],
             "Unexpected captured dimensions"
         );
         let colors: std::collections::HashSet<_> = first.image.pixels.iter().collect();
@@ -302,6 +302,40 @@ fn real_headless_sway_ui_persistence_and_rollback() -> Result<()> {
             "Capture did not recover after re-enabling an output"
         );
         println!("✓ real Wayland screen pixels captured; disabled/re-enabled displays recover");
+        let left_edge = |screens: &[layman::capture::Screen]| -> Result<usize> {
+            let image = &screens
+                .iter()
+                .find(|s| s.name == "HEADLESS-1")
+                .context("First screen")?
+                .image;
+            image
+                .pixels
+                .iter()
+                .enumerate()
+                .filter(|(i, color)| {
+                    let (x, y) = (i % image.size[0], i / image.size[0]);
+                    (20..980).contains(&x)
+                        && (130..700).contains(&y)
+                        && **color == layman::theme::ACCENT
+                })
+                .map(|(i, _)| i % image.size[0])
+                .min()
+                .context("Display border pixels")
+        };
+        let before_pan = left_edge(&capture.screens()?)?;
+        pointer.motion(200, 170)?;
+        pointer.button(true)?;
+        pointer.motion(260, 210)?;
+        pointer.button(false)?;
+        std::thread::sleep(Duration::from_millis(200));
+        let after_pan = left_edge(&capture.screens()?)?;
+        ensure!(
+            after_pan == before_pan + 60,
+            "Grabbing empty canvas did not pan the view: {before_pan} → {after_pan}"
+        );
+        equivalent_outputs(&candidate, &sway.snapshot()?);
+        pointer.click(80, 80)?; // Fit resets the view before testing screen dragging.
+        println!("✓ real pointer grabs and pans the canvas without changing display positions");
         // Drag the lower display in the actual canvas, preview it, then revert.
         pointer.motion(500, 550)?;
         pointer.button(true)?;
@@ -333,7 +367,7 @@ fn real_headless_sway_ui_persistence_and_rollback() -> Result<()> {
         pointer.click(34, 80)?; // Arrange in a row, through the actual UI.
         sway.capture("headless-ui.png")?;
         println!("✓ native Wayland/OpenGL UI rendered; artifacts/headless-ui.png");
-        pointer.click(1246, 766)?; // Preview layout.
+        pointer.click(1246, 766)?; // Save layout starts the confirmation window.
         let row = sway.snapshot()?;
         ensure!(
             row.outputs[1].rect.x == 1280 && row.outputs[1].rect.y == 0,
@@ -351,13 +385,13 @@ fn real_headless_sway_ui_persistence_and_rollback() -> Result<()> {
                 .join("\n")
                 + "\n",
         )?;
-        pointer.click(1246, 766)?; // Keep & save.
+        pointer.click(1246, 766)?; // Confirm & save.
         let saved = store::load_at(&saved_dir)?.context("UI did not save")?;
         ensure!(
             saved.outputs[1].rect.x == 1280 && saved.outputs[1].rect.y == 0,
             "UI confirmation did not persist the arranged layout"
         );
-        println!("✓ actual GUI Arrange → Preview → Keep interaction applies and saves");
+        println!("✓ actual GUI Arrange → Save → Confirm interaction applies and saves");
         sway.capture("headless-save-diff.png")?;
         // Same integration path as the dialog, in an isolated config. No desktop writes.
         let patch = layman::integration::Patch::check(&sway.config, &saved_dir.join("sway.conf"))?;
@@ -376,7 +410,7 @@ fn real_headless_sway_ui_persistence_and_rollback() -> Result<()> {
             .find(|s| s.name == "HEADLESS-1")
             .context("First screen")?;
         ensure!(
-            first.image.pixels[100 * 640 + 50] == layman::theme::BG,
+            first.image.pixels[200 * 1280 + 100] == layman::theme::BG,
             "Setup dialog was shown despite an existing include"
         );
         sway.command("reload")?;

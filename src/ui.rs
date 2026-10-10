@@ -34,6 +34,7 @@ pub struct App {
     snapping: bool,
     zoom: f32,
     pan: Vec2,
+    pan_drag: Option<(Pos2, Vec2)>,
     drag: Option<Drag>,
     help: bool,
     new_workspace: String,
@@ -85,6 +86,7 @@ impl App {
             snapping: true,
             zoom: 1.,
             pan: Vec2::ZERO,
+            pan_drag: None,
             drag: None,
             help: false,
             new_workspace: String::new(),
@@ -140,6 +142,7 @@ impl App {
     fn fit(&mut self) {
         self.zoom = 1.;
         self.pan = Vec2::ZERO;
+        self.pan_drag = None;
     }
     fn preview(&mut self) {
         match Preview::start(&self.layout) {
@@ -311,7 +314,7 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 12.;
                         if self.preview.is_some() {
-                            if icons::button(ui, Icon::Save, "Keep & save", true).clicked() {
+                            if icons::button(ui, Icon::Confirm, "Confirm & save", true).clicked() {
                                 self.finish(true);
                             }
                             if icons::button(ui, Icon::Revert, "Revert preview", false).clicked() {
@@ -320,8 +323,8 @@ impl App {
                         } else {
                             if icons::enabled_button(
                                 ui,
-                                Icon::Preview,
-                                "Preview layout",
+                                Icon::Save,
+                                "Save layout · confirm within 20 seconds",
                                 true,
                                 !self.demo && self.refresh_receiver.is_none(),
                             )
@@ -647,6 +650,7 @@ impl App {
         if ui.is_enabled()
             && ui.input(|i| i.pointer.hover_pos().is_some_and(|p| rect.contains(p)))
             && self.drag.is_none()
+            && self.pan_drag.is_none()
         {
             let scroll = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll.abs() > 0.01 {
@@ -659,6 +663,31 @@ impl App {
                 ui.ctx().request_repaint();
             }
         }
+        let screen_rects: Vec<_> = active
+            .iter()
+            .map(|(_, o)| {
+                let (w, h) = o.size();
+                Rect::from_min_size(
+                    origin + Vec2::new(o.rect.x as f32, o.rect.y as f32) * scale,
+                    Vec2::new(w as f32, h as f32) * scale,
+                )
+            })
+            .collect();
+        if ui.is_enabled() && self.drag.is_none() {
+            let start = ui.input(|i| {
+                let origin = i.pointer.press_origin()?;
+                let primary = i.pointer.primary_pressed();
+                let pan = i.pointer.button_pressed(egui::PointerButton::Middle)
+                    || (primary
+                        && (i.key_down(egui::Key::Space)
+                            || !screen_rects.iter().any(|r| r.contains(origin))));
+                (pan && rect.contains(origin)).then_some(origin)
+            });
+            if let Some(origin) = start {
+                self.pan_drag = Some((origin, self.pan));
+            }
+        }
+        let pan_gesture = self.pan_drag.is_some();
         let mut start_drag = None;
         for (i, o) in active {
             let (w, h) = o.size();
@@ -671,12 +700,16 @@ impl App {
             let interaction = ui.interact(
                 r.intersect(rect),
                 ui.id().with(("monitor", i)),
-                Sense::click_and_drag(),
+                if pan_gesture {
+                    Sense::hover()
+                } else {
+                    Sense::click_and_drag()
+                },
             );
             if interaction.clicked() {
                 self.selected = i;
             }
-            if interaction.drag_started() {
+            if interaction.drag_started_by(egui::PointerButton::Primary) {
                 self.selected = i;
                 start_drag = Some(Drag {
                     index: i,
@@ -691,69 +724,58 @@ impl App {
             if interaction.hovered() || interaction.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
-            painter.rect_filled(
-                r.translate(Vec2::new(0., 6.)),
-                10.,
-                Color32::from_black_alpha(70),
-            );
-            painter.rect_filled(r, 10., if selected { SELECTED } else { PANEL });
-            painter.rect_stroke(
-                r,
-                10.,
-                Stroke::new(
-                    if selected { 2_f32 } else { 1_f32 },
-                    if selected { color } else { LINE },
-                ),
-                StrokeKind::Inside,
-            );
-            let inner = r.shrink(14.);
-            if r.width() > 100. && r.height() > 90. {
-                painter.text(
-                    inner.left_top(),
-                    Align2::LEFT_TOP,
-                    &o.name,
-                    FontId::proportional(14.),
-                    color,
+            // Screen pixels occupy the entire logical display rect. Chrome stays outside.
+            painter.rect_filled(r, 0., PANEL);
+            if let Some(texture) = self.textures.get(&o.name) {
+                painter.image(
+                    texture.id(),
+                    r,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
+                    Color32::WHITE,
                 );
-                painter.text(
-                    inner.right_top(),
-                    Align2::RIGHT_TOP,
-                    format!("{w} × {h}"),
-                    FontId::proportional(10.),
-                    MUTED,
-                );
-                let body = Rect::from_min_max(inner.min + Vec2::new(0., 28.), inner.max);
-                if let Some(texture) = self.textures.get(&o.name) {
-                    let aspect = texture.size_vec2();
-                    let factor = (body.width() / aspect.x).min(body.height() / aspect.y);
-                    let image = Rect::from_center_size(body.center(), aspect * factor);
-                    painter.image(
-                        texture.id(),
-                        image,
-                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
-                        Color32::WHITE,
-                    );
-                } else {
-                    painter.text(
-                        body.center(),
-                        Align2::CENTER_CENTER,
-                        if self.demo {
-                            "Demo display"
-                        } else {
-                            "Waiting for screen…"
-                        },
-                        FontId::proportional(12.),
-                        MUTED,
-                    );
-                }
             } else {
                 painter.text(
                     r.center(),
                     Align2::CENTER_CENTER,
-                    &o.name,
+                    if self.demo {
+                        "Demo display"
+                    } else {
+                        "Waiting for screen…"
+                    },
                     FontId::proportional(12.),
-                    color,
+                    MUTED,
                 );
+            }
+            painter.rect_stroke(
+                r.expand(2.),
+                0.,
+                Stroke::new(
+                    if selected { 2_f32 } else { 1_f32 },
+                    if selected { color } else { LINE },
+                ),
+                StrokeKind::Outside,
+            );
+            if r.width() > 100. {
+                let label = format!("{}   {w} × {h}", o.name);
+                let galley = painter.layout_no_wrap(label, FontId::proportional(12.), color);
+                let size = galley.size();
+                let positions = [
+                    r.left_top() - Vec2::new(0., size.y + 10.),
+                    r.left_bottom() + Vec2::new(0., 10.),
+                    r.left_center() - Vec2::new(size.x + 10., size.y / 2.),
+                    r.right_center() + Vec2::new(10., -size.y / 2.),
+                ];
+                for position in positions {
+                    let badge = Rect::from_min_size(position, size).expand2(Vec2::new(6., 3.));
+                    if rect.contains(badge.min)
+                        && rect.contains(badge.max)
+                        && !screen_rects.iter().any(|screen| screen.intersects(badge))
+                    {
+                        painter.rect_filled(badge, 4., PANEL);
+                        painter.galley(position, galley, color);
+                        break;
+                    }
+                }
             }
         }
         if let Some(d) = start_drag {
@@ -791,8 +813,17 @@ impl App {
             if !ui.input(|i| i.pointer.primary_down()) {
                 self.drag = None;
             }
-        } else if response.dragged_by(egui::PointerButton::Middle) {
-            self.pan += response.drag_delta();
+        } else if let Some((start, offset)) = self.pan_drag {
+            if let Some(position) = ui.input(|i| i.pointer.interact_pos()) {
+                self.pan = offset + (position - start);
+                ui.ctx().request_repaint();
+            }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            if !ui.input(|i| i.pointer.primary_down() || i.pointer.middle_down()) {
+                self.pan_drag = None;
+            }
+        } else if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
         if response.hovered() && !ui.ctx().wants_keyboard_input() {
             let (dx, dy) = ui.input(|i| {
@@ -901,6 +932,46 @@ pub fn transform(angle: u16, flipped: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grabbing_background_or_middle_dragging_a_screen_pans_without_moving_displays() {
+        for (button, start) in [
+            (egui::PointerButton::Primary, Pos2::new(250., 180.)),
+            (egui::PointerButton::Middle, Pos2::new(450., 400.)),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = App::new(&ctx, true).unwrap();
+            let original = serde_json::to_string(&app.layout).unwrap();
+            let mut draw = |events| {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280., 800.))),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| app.draw(ctx),
+                );
+            };
+            draw(vec![]);
+            draw(vec![egui::Event::PointerMoved(start)]);
+            draw(vec![egui::Event::PointerButton {
+                pos: start,
+                button,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            let end = start + Vec2::new(70., 40.);
+            draw(vec![egui::Event::PointerMoved(end)]);
+            draw(vec![egui::Event::PointerButton {
+                pos: end,
+                button,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            assert_eq!(app.pan, Vec2::new(70., 40.));
+            assert_eq!(serde_json::to_string(&app.layout).unwrap(), original);
+            assert!(app.drag.is_none());
+        }
+    }
     #[test]
     fn scrolling_over_display_pixels_zooms_without_editing_the_layout() {
         let ctx = egui::Context::default();

@@ -219,7 +219,7 @@ fn config_patch_is_reviewable_idempotent_and_refuses_stale_edits() {
 #[test]
 fn screen_pixels_handle_stride_formats_rotation_mirroring_and_inversion() {
     use eframe::egui::Color32;
-    use layman::capture::thumbnail;
+    use layman::capture::decode_frame;
     use wayland_client::protocol::wl_shm::Format;
     // A non-square, asymmetric image with padding at the end of each row.
     let data: Vec<u8> = [1_u32, 2, 3, 999, 4, 5, 6, 999]
@@ -237,14 +237,15 @@ fn screen_pixels_handle_stride_formats_rotation_mirroring_and_inversion() {
         vec![6, 3, 5, 2, 4, 1],
     ];
     for (transform, expected) in expected.iter().enumerate() {
-        let image = thumbnail(&data, 3, 2, 16, Format::Xrgb8888, false, transform as u32).unwrap();
+        let image =
+            decode_frame(&data, 3, 2, 16, Format::Xrgb8888, false, transform as u32).unwrap();
         assert_eq!(image.size, if transform % 2 == 0 { [3, 2] } else { [2, 3] });
         assert_eq!(
             image.pixels.iter().map(|p| p.b()).collect::<Vec<_>>(),
             *expected
         );
     }
-    let inverted = thumbnail(&data, 3, 2, 16, Format::Xrgb8888, true, 0).unwrap();
+    let inverted = decode_frame(&data, 3, 2, 16, Format::Xrgb8888, true, 0).unwrap();
     assert_eq!(
         inverted.pixels.iter().map(|p| p.b()).collect::<Vec<_>>(),
         [4, 5, 6, 1, 2, 3]
@@ -255,10 +256,10 @@ fn screen_pixels_handle_stride_formats_rotation_mirroring_and_inversion() {
         (Format::Bgrx8888, 0x563412ff),
         (Format::Rgbx8888, 0x123456ff),
     ] {
-        let image = thumbnail(&value.to_ne_bytes(), 1, 1, 4, format, false, 0).unwrap();
+        let image = decode_frame(&value.to_ne_bytes(), 1, 1, 4, format, false, 0).unwrap();
         assert_eq!(image.pixels[0], Color32::from_rgb(0x12, 0x34, 0x56));
     }
-    let image = thumbnail(
+    let image = decode_frame(
         &0x3ff00000_u32.to_ne_bytes(),
         1,
         1,
@@ -269,6 +270,6 @@ fn screen_pixels_handle_stride_formats_rotation_mirroring_and_inversion() {
     )
     .unwrap();
     assert_eq!(image.pixels[0], Color32::RED);
-    assert!(thumbnail(&data, 3, 2, 8, Format::Xrgb8888, false, 0).is_err());
-    assert!(thumbnail(&data[..4], 3, 2, 16, Format::Xrgb8888, false, 0).is_err());
+    assert!(decode_frame(&data, 3, 2, 8, Format::Xrgb8888, false, 0).is_err());
+    assert!(decode_frame(&data[..4], 3, 2, 16, Format::Xrgb8888, false, 0).is_err());
 }

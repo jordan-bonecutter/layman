@@ -29,19 +29,24 @@ control snaps to 0.25× increments, with minus/plus buttons for precise changes.
 Four orientation icons select 0°, 90°, 180°, or 270°; the Mirror checkbox flips
 horizontally.
 Arrow keys over the canvas nudge the selected monitor; Shift nudges by 10 pixels.
-Scroll over the canvas to zoom around the pointer. Middle-drag pans; the
+Scroll over the canvas to zoom around the pointer. Drag empty canvas to pan, or
+hold Space and drag anywhere (middle-drag also works). Dragging screen pixels
+still moves that display. Labels and borders sit outside the screen image. The
 four-corner icon fits the displays to the canvas. All toolbar
 and footer icons have tooltips and keyboard focus.
 
 Each monitor shows real screen pixels, captured directly through Wayland's
 wlr-screencopy protocol and shared-memory buffers. Capture runs on a background
-thread about three times a second, with bounded waits, and handles rotation,
+thread at native resolution, targeting 30 frames per second, with bounded waits.
+The GPU scales previews to the canvas; capture and pixel conversion use shared
+memory on the CPU. Actual refresh depends on the compositor and screen sizes.
+Capture handles rotation,
 mirroring, and output hotplug. The app needs no screenshot utility. Previews show
 the currently running desktop; draft settings take effect when you press Preview.
 The workspace tab assigns current and future workspaces to displays. The refresh
 icon reloads the current output settings from Sway without blocking the UI.
 
-**Preview layout** applies the draft for 20 seconds. **Keep & save** makes it
+The **Save layout** icon applies the draft for 20 seconds. **Confirm & save** makes it
 persistent; Revert, timeout, or closing/crashing the editor restores the previous
 outputs and workspace placement. A separate Rust helper handles rollback even
 when the UI has gone away. It runs only during a preview. Changes must leave at
@@ -49,7 +54,7 @@ least one connected display enabled. Overlaps and disconnected edges show hints.
 
 ## Survive Sway reloads
 
-After Keep & save, add this line **at the end** of your Sway config, after any
+After Confirm & save, add this line **at the end** of your Sway config, after any
 other output/workspace rules:
 
 ```sway
@@ -116,7 +121,7 @@ The headless test needs `sway`, `grim`, and Mesa software EGL/OpenGL. It starts
 its **own** two-output compositor with a private runtime directory and IPC
 socket, isolates configuration writes, renders the actual native UI, captures
 `artifacts/headless-ui.png` and `headless-preview.png`, tests dragging and
-Arrange → Preview → Keep with a real virtual Wayland pointer, moves a workspace
+Arrange → Save → Confirm with a real virtual Wayland pointer, moves a workspace
 with a live Wayland window, tests the save dialog's config diff and Apply button,
 checks real screen capture and output re-enabling, exercises Refresh after external
 layout changes, checks save/reload, and waits out the real 20-second rollback deadline. It

@@ -8,15 +8,13 @@ pub enum Icon {
     Snap,
     Minus,
     Plus,
-    Zoom,
     Refresh,
     Load,
     Reset,
-    Preview,
+    Confirm,
     Save,
     Revert,
     Rotation(u16),
-    Flip,
 }
 
 pub fn button(ui: &mut egui::Ui, icon: Icon, label: &str, active: bool) -> egui::Response {
@@ -106,8 +104,11 @@ pub fn paint(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
         Icon::Row => {
             screen((0., 0.38), (0.38, 0.82));
             screen((0.46, 0.14), (1., 0.82));
-            line((0., 0.02), (1., 0.02));
-            line((0., 0.98), (1., 0.98));
+            for x in [0.05, 0.25, 0.45, 0.65, 0.85] {
+                for y in [0.02, 0.98] {
+                    p.circle_filled(point(x, y), 0.8, color);
+                }
+            }
         }
         Icon::Fit => {
             for (x, y, dx, dy) in [
@@ -139,41 +140,70 @@ pub fn paint(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
                 line((0.5, 0.2), (0.5, 0.8));
             }
         }
-        Icon::Zoom => {
-            p.circle_stroke(point(0.4, 0.4), r.width() * 0.28, s);
-            line((0.62, 0.62), (0.95, 0.95));
+        Icon::Refresh => {
+            // Two clockwise arcs; arrowheads follow each arc's tangent.
+            for start in [-2.85_f32, 0.29] {
+                let end = start + 2.55;
+                let pts = (0..=20)
+                    .map(|i| {
+                        let a = start + i as f32 / 20. * (end - start);
+                        point(0.5 + a.cos() * 0.36, 0.5 + a.sin() * 0.36)
+                    })
+                    .collect();
+                p.add(egui::Shape::line(pts, s));
+                let tip = point(0.5 + end.cos() * 0.36, 0.5 + end.sin() * 0.36);
+                let tangent = Vec2::new(-end.sin(), end.cos());
+                let normal = Vec2::new(end.cos(), end.sin());
+                for side in [-1., 1.] {
+                    p.line_segment([tip, tip - tangent * 4.5 + normal * (side * 3.)], s);
+                }
+            }
         }
-        Icon::Refresh | Icon::Reset => {
-            let pts = (0..=18)
+        Icon::Reset => {
+            line((0.1, 0.32), (0.28, 0.12));
+            line((0.1, 0.32), (0.3, 0.5));
+            line((0.1, 0.32), (0.56, 0.32));
+            let pts = (0..=20)
                 .map(|i| {
-                    let a = -0.6 + i as f32 / 18. * 5.2;
-                    point(0.5 + a.cos() * 0.34, 0.5 + a.sin() * 0.34)
+                    let a = -std::f32::consts::FRAC_PI_2 + i as f32 / 20. * std::f32::consts::PI;
+                    point(0.56 + a.cos() * 0.28, 0.6 + a.sin() * 0.28)
                 })
                 .collect();
             p.add(egui::Shape::line(pts, s));
-            line((0.8, 0.09), (0.8, 0.37));
-            line((0.8, 0.37), (0.53, 0.37));
-            if matches!(icon, Icon::Reset) {
-                line((0.35, 0.5), (0.65, 0.5));
-            }
+            line((0.56, 0.88), (0.3, 0.88));
         }
         Icon::Load => {
-            screen((0.08, 0.4), (0.92, 0.92));
-            line((0.5, 0.03), (0.5, 0.63));
-            line((0.3, 0.43), (0.5, 0.63));
-            line((0.5, 0.63), (0.7, 0.43));
-        }
-        Icon::Preview => {
-            screen((0., 0.12), (1., 0.82));
             p.add(egui::Shape::closed_line(
-                vec![point(0.4, 0.3), point(0.4, 0.64), point(0.67, 0.47)],
+                vec![
+                    point(0.08, 0.14),
+                    point(0.37, 0.14),
+                    point(0.48, 0.27),
+                    point(0.92, 0.27),
+                    point(0.92, 0.88),
+                    point(0.08, 0.88),
+                ],
                 s,
             ));
-            line((0.5, 0.82), (0.5, 0.98));
+            line((0.5, 0.73), (0.5, 0.43));
+            line((0.34, 0.59), (0.5, 0.43));
+            line((0.5, 0.43), (0.66, 0.59));
+        }
+        Icon::Confirm => {
+            line((0.12, 0.51), (0.39, 0.78));
+            line((0.39, 0.78), (0.88, 0.22));
         }
         Icon::Save => {
-            screen((0.08, 0.08), (0.92, 0.92));
-            screen((0.28, 0.08), (0.72, 0.38));
+            p.add(egui::Shape::closed_line(
+                vec![
+                    point(0.08, 0.08),
+                    point(0.72, 0.08),
+                    point(0.92, 0.28),
+                    point(0.92, 0.92),
+                    point(0.08, 0.92),
+                ],
+                s,
+            ));
+            screen((0.28, 0.08), (0.65, 0.38));
             screen((0.25, 0.62), (0.75, 0.92));
         }
         Icon::Revert => {
@@ -203,17 +233,6 @@ pub fn paint(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
                 [rotate(0.24, 0.59), rotate(0.38, 0.59)],
                 Stroke::new(2.4_f32, color),
             );
-        }
-        Icon::Flip => {
-            line((0.5, 0.05), (0.5, 0.95));
-            p.add(egui::Shape::closed_line(
-                vec![point(0.05, 0.8), point(0.35, 0.8), point(0.35, 0.2)],
-                s,
-            ));
-            p.add(egui::Shape::closed_line(
-                vec![point(0.65, 0.2), point(0.65, 0.8), point(0.95, 0.8)],
-                s,
-            ));
         }
     }
 }
