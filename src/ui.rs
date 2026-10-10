@@ -1,26 +1,17 @@
 use crate::{
+    capture,
     icons::{self, Icon},
-    integration, ipc, live,
+    integration, ipc,
     model::{Layout, Mode, Output, Rect as OutputRect, Workspace, snap},
     preview::Preview,
     store,
+    theme::*,
 };
 use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
 };
 
-const BG: Color32 = Color32::from_rgb(17, 21, 27);
-const PANEL: Color32 = Color32::from_rgb(24, 29, 37);
-const LINE: Color32 = Color32::from_rgb(46, 55, 67);
-const MUTED: Color32 = Color32::from_rgb(147, 160, 177);
-const MINT: Color32 = Color32::from_rgb(150, 235, 200);
-const TEXT: Color32 = Color32::from_rgb(233, 239, 246);
-const COLORS: [Color32; 4] = [
-    MINT,
-    Color32::from_rgb(169, 185, 255),
-    Color32::from_rgb(247, 198, 132),
-    Color32::from_rgb(235, 163, 194),
-];
+const COLORS: [Color32; 4] = [ACCENT, TEXT, WARN, TEXT];
 
 #[derive(Clone, Copy)]
 struct Drag {
@@ -46,8 +37,9 @@ pub struct App {
     drag: Option<Drag>,
     help: bool,
     new_workspace: String,
-    scenes: Vec<live::Workspace>,
-    receiver: Option<std::sync::mpsc::Receiver<anyhow::Result<Vec<live::Workspace>>>>,
+    textures: std::collections::HashMap<String, egui::TextureHandle>,
+    receiver: Option<std::sync::mpsc::Receiver<anyhow::Result<Vec<capture::Screen>>>>,
+    refresh_receiver: Option<std::sync::mpsc::Receiver<anyhow::Result<Layout>>>,
     live_error: Option<String>,
     config_patch: Option<integration::Patch>,
     config_message: String,
@@ -59,12 +51,15 @@ impl App {
         visuals.window_fill = PANEL;
         visuals.extreme_bg_color = BG;
         visuals.override_text_color = Some(TEXT);
-        visuals.selection.bg_fill = Color32::from_rgb(48, 82, 73);
-        visuals.selection.stroke = Stroke::new(1_f32, MINT);
-        visuals.widgets.inactive.bg_fill = Color32::from_rgb(35, 42, 52);
+        visuals.selection.bg_fill = SELECTED;
+        visuals.selection.stroke = Stroke::new(1_f32, ACCENT);
+        visuals.widgets.inactive.bg_fill = PANEL;
+        visuals.widgets.inactive.weak_bg_fill = PANEL;
         visuals.widgets.inactive.bg_stroke = Stroke::new(1_f32, LINE);
-        visuals.widgets.hovered.bg_fill = Color32::from_rgb(48, 59, 70);
-        visuals.widgets.active.bg_fill = Color32::from_rgb(55, 82, 76);
+        visuals.widgets.hovered.bg_fill = LINE;
+        visuals.widgets.hovered.weak_bg_fill = LINE;
+        visuals.widgets.active.bg_fill = SELECTED;
+        visuals.widgets.active.weak_bg_fill = SELECTED;
         ctx.set_visuals(visuals);
         ctx.style_mut(|s| {
             s.spacing.item_spacing = Vec2::new(10., 10.);
@@ -93,11 +88,12 @@ impl App {
             drag: None,
             help: false,
             new_workspace: String::new(),
-            scenes: if demo { demo_scenes() } else { Vec::new() },
+            textures: std::collections::HashMap::new(),
+            refresh_receiver: None,
             receiver: if demo {
                 None
             } else {
-                Some(live::poll(ctx.clone()))
+                Some(capture::poll(ctx.clone()))
             },
             live_error: None,
             config_patch: None,
@@ -110,17 +106,17 @@ impl App {
             Err(e) => format!("{e:#}"),
         };
     }
-    fn refresh(&mut self) {
-        match ipc::snapshot() {
-            Ok(l) => {
-                self.layout = l.clone();
-                self.baseline = l;
-                self.selected = 0;
-                self.fit();
-                self.status.clear();
-            }
-            Err(e) => self.status = format!("{e:#}"),
+    fn refresh(&mut self, ctx: &egui::Context) {
+        if self.refresh_receiver.is_some() {
+            return;
         }
+        let (send, receive) = std::sync::mpsc::channel();
+        self.refresh_receiver = Some(receive);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = send.send(ipc::snapshot());
+            ctx.request_repaint();
+        });
     }
     fn load_saved(&mut self) {
         let result = (|| {
@@ -171,48 +167,75 @@ impl App {
         self.config_patch = None;
         match integration::check() {
             Ok(patch) => {
-                self.config_message = if patch.installed() {
-                    "Include already installed.".into()
+                self.config_message.clear();
+                if patch.installed() {
+                    self.help = false;
                 } else {
-                    String::new()
-                };
-                self.config_patch = Some(patch);
+                    self.config_patch = Some(patch);
+                }
             }
             Err(e) => self.config_message = format!("{e:#}"),
         }
     }
-    fn read_live(&mut self) {
+    fn read_live(&mut self, ctx: &egui::Context) {
         if let Some(receiver) = &self.receiver {
             while let Ok(result) = receiver.try_recv() {
                 match result {
-                    Ok(scenes) => {
-                        for scene in &scenes {
-                            if !self.layout.workspaces.iter().any(|w| w.name == scene.name)
-                                && self
-                                    .layout
-                                    .outputs
-                                    .iter()
-                                    .any(|o| o.name == scene.output && o.active)
-                            {
-                                let workspace = Workspace {
-                                    name: scene.name.clone(),
-                                    output: scene.output.clone(),
-                                    focused: false,
-                                };
-                                self.layout.workspaces.push(workspace.clone());
-                                self.baseline.workspaces.push(workspace);
+                    Ok(screens) => {
+                        let names: std::collections::HashSet<_> =
+                            screens.iter().map(|s| s.name.clone()).collect();
+                        self.textures.retain(|name, _| names.contains(name));
+                        for screen in screens {
+                            if let Some(texture) = self.textures.get_mut(&screen.name) {
+                                texture.set(screen.image, egui::TextureOptions::LINEAR);
+                            } else {
+                                self.textures.insert(
+                                    screen.name.clone(),
+                                    ctx.load_texture(
+                                        screen.name,
+                                        screen.image,
+                                        egui::TextureOptions::LINEAR,
+                                    ),
+                                );
                             }
                         }
-                        self.scenes = scenes;
                         self.live_error = None;
                     }
-                    Err(e) => self.live_error = Some(format!("Live previews unavailable: {e:#}")),
+                    Err(e) => {
+                        self.textures.clear();
+                        self.live_error = Some(format!("Screen previews: {e:#}"));
+                    }
                 }
             }
         }
+        if let Some(receiver) = &self.refresh_receiver
+            && let Ok(result) = receiver.try_recv()
+        {
+            match result {
+                Ok(layout) => {
+                    let selected = self
+                        .layout
+                        .outputs
+                        .get(self.selected)
+                        .map(|o| o.name.clone());
+                    self.selected = layout
+                        .outputs
+                        .iter()
+                        .position(|o| Some(&o.name) == selected.as_ref())
+                        .unwrap_or(0);
+                    self.layout = layout.clone();
+                    self.baseline = layout;
+                    self.drag = None;
+                    self.fit();
+                    self.status.clear();
+                }
+                Err(e) => self.status = format!("Refresh failed: {e:#}"),
+            }
+            self.refresh_receiver = None;
+        }
     }
     pub fn draw(&mut self, ctx: &egui::Context) {
-        self.read_live();
+        self.read_live(ctx);
         if self.preview.as_ref().is_some_and(|p| p.remaining() == 0) {
             self.finish(false);
         }
@@ -222,26 +245,25 @@ impl App {
         egui::TopBottomPanel::top("toolbar")
             .frame(egui::Frame::new().fill(BG).inner_margin(16.))
             .show(ctx, |ui| {
+                let (logo, _) = ui.allocate_exact_size(Vec2::new(34., 30.), Sense::hover());
+                let screen =
+                    Rect::from_min_size(logo.left_top() + Vec2::new(0., 2.), Vec2::new(30., 20.));
+                ui.painter().rect_stroke(
+                    screen,
+                    3.,
+                    Stroke::new(1.5_f32, ACCENT),
+                    StrokeKind::Inside,
+                );
+                ui.painter().line_segment(
+                    [
+                        logo.left_top() + Vec2::new(7., 27.),
+                        logo.left_top() + Vec2::new(23., 27.),
+                    ],
+                    Stroke::new(1.5_f32, ACCENT),
+                );
+                ui.add_space(6.);
                 ui.add_enabled_ui(self.preview.is_none(), |ui| {
                     ui.horizontal(|ui| {
-                        let (logo, _) = ui.allocate_exact_size(Vec2::new(26., 36.), Sense::hover());
-                        let screen = Rect::from_min_size(
-                            logo.left_top() + Vec2::new(0., 8.),
-                            Vec2::new(18., 14.),
-                        );
-                        ui.painter().rect_stroke(
-                            screen,
-                            3.,
-                            Stroke::new(1.5_f32, MINT),
-                            StrokeKind::Inside,
-                        );
-                        ui.painter().rect_stroke(
-                            screen.translate(Vec2::new(6., 6.)),
-                            3.,
-                            Stroke::new(1.5_f32, MINT),
-                            StrokeKind::Inside,
-                        );
-                        ui.add_space(14.);
                         if icons::button(ui, Icon::Row, "Arrange in a row", false).clicked() {
                             self.layout.horizontal();
                             self.fit();
@@ -259,79 +281,74 @@ impl App {
                         {
                             self.snapping = !self.snapping;
                         }
-                        ui.add_space(10.);
-                        if icons::button(ui, Icon::Minus, "Zoom out", false).clicked() {
-                            self.zoom = (self.zoom / 1.2).max(0.3);
-                        }
-                        if icons::button(
+                        if icons::enabled_button(
                             ui,
-                            Icon::Zoom,
-                            &format!("Reset zoom · {:.0}%", self.zoom * 100.),
-                            false,
+                            Icon::Refresh,
+                            "Refresh displays from Sway",
+                            self.refresh_receiver.is_some(),
+                            !self.demo && self.refresh_receiver.is_none(),
                         )
                         .clicked()
                         {
-                            self.fit();
+                            self.refresh(ctx);
                         }
-                        if icons::button(ui, Icon::Plus, "Zoom in", false).clicked() {
-                            self.zoom = (self.zoom * 1.2).min(4.);
-                        }
-                        ui.add_space(10.);
-                        ui.add_enabled_ui(!self.demo, |ui| {
-                            if icons::button(ui, Icon::Refresh, "Refresh displays from Sway", false)
-                                .clicked()
-                            {
-                                self.refresh();
-                            }
-                        });
                     });
                 });
             });
         egui::TopBottomPanel::bottom("footer")
-            .frame(egui::Frame::new().fill(BG).inner_margin(16.))
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(16.))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(p) = &self.preview {
                         ui.label(
                             RichText::new(format!("{}s", p.remaining()))
                                 .monospace()
-                                .color(MINT),
+                                .color(ACCENT),
                         );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    } else if !self.status.is_empty() {
+                        ui.label(RichText::new(&self.status).size(12.).color(WARN));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 12.;
+                        if self.preview.is_some() {
                             if icons::button(ui, Icon::Save, "Keep & save", true).clicked() {
                                 self.finish(true);
                             }
                             if icons::button(ui, Icon::Revert, "Revert preview", false).clicked() {
                                 self.finish(false);
                             }
-                        });
-                    } else {
-                        if !self.status.is_empty() {
-                            ui.label(RichText::new(&self.status).size(12.).color(COLORS[2]));
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add_enabled_ui(!self.demo, |ui| {
-                                if icons::button(ui, Icon::Preview, "Preview layout", true)
-                                    .clicked()
-                                {
-                                    self.preview();
-                                }
-                            });
+                        } else {
+                            if icons::enabled_button(
+                                ui,
+                                Icon::Preview,
+                                "Preview layout",
+                                true,
+                                !self.demo && self.refresh_receiver.is_none(),
+                            )
+                            .clicked()
+                            {
+                                self.preview();
+                            }
                             if icons::button(ui, Icon::Reset, "Reset edits", false).clicked() {
                                 self.layout = self.baseline.clone();
                                 self.selected = 0;
+                                self.drag = None;
                                 self.fit();
                                 self.status.clear();
                             }
-                            ui.add_enabled_ui(!self.demo, |ui| {
-                                if icons::button(ui, Icon::Load, "Load saved layout", false)
-                                    .clicked()
-                                {
-                                    self.load_saved();
-                                }
-                            });
-                        });
-                    }
+                            if icons::enabled_button(
+                                ui,
+                                Icon::Load,
+                                "Load saved layout",
+                                false,
+                                !self.demo,
+                            )
+                            .clicked()
+                            {
+                                self.load_saved();
+                            }
+                        }
+                    });
                 });
             });
         egui::SidePanel::right("inspector")
@@ -345,6 +362,7 @@ impl App {
                         ui.selectable_value(&mut self.tab, 1, "Workspaces");
                     });
                     ui.add_space(14.);
+                    ui.spacing_mut().item_spacing.y = 7.;
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if self.tab == 0 {
                             self.inspector(ui);
@@ -373,6 +391,7 @@ impl App {
     }
     fn save_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.help;
+        let mut close = false;
         egui::Window::new("Saved layout")
             .collapsible(false)
             .resizable(true)
@@ -391,6 +410,9 @@ impl App {
                 });
                 if ui.button("Check Sway config").clicked() {
                     self.check_config();
+                    if !self.help {
+                        close = true;
+                    }
                 }
                 if let Some(patch) = &self.config_patch {
                     ui.label(
@@ -407,7 +429,7 @@ impl App {
                                     ui.spacing_mut().item_spacing.y = 2.;
                                     for (kind, line) in patch.diff() {
                                         let color = match kind {
-                                            '+' => MINT,
+                                            '+' => ACCENT,
                                             '-' => Color32::from_rgb(246, 153, 153),
                                             _ => MUTED,
                                         };
@@ -422,7 +444,10 @@ impl App {
                         });
                         if ui.button("Apply diff").clicked() {
                             match patch.apply() {
-                                Ok(()) => self.check_config(),
+                                Ok(()) => {
+                                    self.check_config();
+                                    close = true;
+                                }
                                 Err(e) => self.config_message = format!("{e:#}"),
                             }
                         }
@@ -432,19 +457,40 @@ impl App {
                     ui.label(&self.config_message);
                 }
             });
-        self.help = open;
+        self.help = open && !close;
     }
     fn inspector(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("DISPLAYS").size(11.).color(MUTED));
-        for (i, o) in self.layout.outputs.iter().enumerate() {
-            let color = COLORS[i % COLORS.len()];
-            let label = format!("{}   {}", if o.active { "[on]" } else { "[off]" }, o.name);
-            if ui
-                .selectable_label(self.selected == i, RichText::new(label).color(color))
-                .clicked()
-            {
-                self.selected = i;
-            }
+        for (i, o) in self.layout.outputs.iter_mut().enumerate() {
+            egui::Frame::new()
+                .fill(if self.selected == i { SELECTED } else { PANEL })
+                .corner_radius(6.)
+                .inner_margin(8.)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let width = (ui.available_width() - 46.).max(40.);
+                        let (rect, response) =
+                            ui.allocate_exact_size(Vec2::new(width, 26.), egui::Sense::click());
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                ui.is_enabled(),
+                                &o.name,
+                            )
+                        });
+                        ui.painter().text(
+                            rect.left_center(),
+                            egui::Align2::LEFT_CENTER,
+                            &o.name,
+                            egui::FontId::proportional(14.),
+                            if self.selected == i { ACCENT } else { TEXT },
+                        );
+                        if response.clicked() {
+                            self.selected = i;
+                        }
+                        icons::switch(ui, &mut o.active, &format!("Enable {}", o.name));
+                    });
+                });
         }
         ui.add_space(16.);
         ui.separator();
@@ -458,23 +504,31 @@ impl App {
                 .size(12.)
                 .color(MUTED),
         );
-        ui.add_space(6.);
-        ui.checkbox(&mut o.active, "Display enabled");
-        ui.add_space(8.);
+        ui.add_space(12.);
         ui.label(RichText::new("Resolution & refresh").size(12.).color(MUTED));
-        egui::ComboBox::from_id_salt("mode")
-            .width(235.)
-            .selected_text(
-                o.current_mode
-                    .as_ref()
-                    .map(Mode::label)
-                    .unwrap_or_else(|| "Select mode".into()),
-            )
-            .show_ui(ui, |ui| {
-                for m in &o.modes {
-                    ui.selectable_value(&mut o.current_mode, Some(m.clone()), m.label());
-                }
-            });
+        ui.scope(|ui| {
+            ui.style_mut().spacing.button_padding = Vec2::new(12., 10.);
+            ui.style_mut().visuals.widgets.inactive.bg_fill = BG;
+            ui.style_mut().visuals.widgets.inactive.weak_bg_fill = BG;
+            ui.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::new(1_f32, LINE);
+            ui.style_mut().visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
+            egui::ComboBox::from_id_salt(("mode", &o.name))
+                .width(ui.available_width())
+                .selected_text(
+                    RichText::new(
+                        o.current_mode
+                            .as_ref()
+                            .map(Mode::label)
+                            .unwrap_or_else(|| "Select mode".into()),
+                    )
+                    .size(12.),
+                )
+                .show_ui(ui, |ui| {
+                    for mode in &o.modes {
+                        ui.selectable_value(&mut o.current_mode, Some(mode.clone()), mode.label());
+                    }
+                });
+        });
         ui.add_space(8.);
         icons::scale(ui, &mut o.scale);
         ui.add_space(12.);
@@ -500,8 +554,11 @@ impl App {
                 }
             }
         });
-        if icons::button(ui, Icon::Flip, "Mirror display", flipped).clicked() {
-            o.transform = transform(angle, !flipped);
+        ui.add_space(12.);
+        ui.label(RichText::new("Mirror").size(12.).color(MUTED));
+        let mut mirrored = flipped;
+        if ui.checkbox(&mut mirrored, "Flip horizontally").changed() {
+            o.transform = transform(angle, mirrored);
         }
         if let Err(e) = self.layout.validate() {
             ui.add_space(12.);
@@ -549,8 +606,7 @@ impl App {
             Sense::click_and_drag(),
         );
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 16., Color32::from_rgb(20, 25, 32));
-        painter.rect_stroke(rect, 16., Stroke::new(1_f32, LINE), StrokeKind::Inside);
+
         let active: Vec<_> = self
             .layout
             .outputs
@@ -588,6 +644,21 @@ impl App {
             rect.center() - Vec2::new((max_x + min_x) * scale / 2., (max_y + min_y) * scale / 2.)
                 + self.pan,
         );
+        if ui.is_enabled()
+            && ui.input(|i| i.pointer.hover_pos().is_some_and(|p| rect.contains(p)))
+            && self.drag.is_none()
+        {
+            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+            if scroll.abs() > 0.01 {
+                let factor = (scroll * 0.003).exp();
+                let next = (self.zoom * factor).clamp(0.3, 4.);
+                let ratio = next / self.zoom;
+                let pointer = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
+                self.pan = (pointer - rect.center()) * (1. - ratio) + self.pan * ratio;
+                self.zoom = next;
+                ui.ctx().request_repaint();
+            }
+        }
         let mut start_drag = None;
         for (i, o) in active {
             let (w, h) = o.size();
@@ -625,15 +696,7 @@ impl App {
                 10.,
                 Color32::from_black_alpha(70),
             );
-            painter.rect_filled(
-                r,
-                10.,
-                if selected {
-                    Color32::from_rgb(37, 57, 53)
-                } else {
-                    Color32::from_rgb(32, 40, 51)
-                },
-            );
+            painter.rect_filled(r, 10., if selected { SELECTED } else { PANEL });
             painter.rect_stroke(
                 r,
                 10.,
@@ -659,14 +722,30 @@ impl App {
                     FontId::proportional(10.),
                     MUTED,
                 );
-                let assigned: Vec<_> = self
-                    .layout
-                    .workspaces
-                    .iter()
-                    .filter(|w| w.output == o.name)
-                    .collect();
                 let body = Rect::from_min_max(inner.min + Vec2::new(0., 28.), inner.max);
-                paint_workspaces(&painter, body, &assigned, &self.scenes, color);
+                if let Some(texture) = self.textures.get(&o.name) {
+                    let aspect = texture.size_vec2();
+                    let factor = (body.width() / aspect.x).min(body.height() / aspect.y);
+                    let image = Rect::from_center_size(body.center(), aspect * factor);
+                    painter.image(
+                        texture.id(),
+                        image,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
+                        Color32::WHITE,
+                    );
+                } else {
+                    painter.text(
+                        body.center(),
+                        Align2::CENTER_CENTER,
+                        if self.demo {
+                            "Demo display"
+                        } else {
+                            "Waiting for screen…"
+                        },
+                        FontId::proportional(12.),
+                        MUTED,
+                    );
+                }
             } else {
                 painter.text(
                     r.center(),
@@ -818,129 +897,37 @@ pub fn transform(angle: u16, flipped: bool) -> String {
         (a, false) => a.to_string(),
     }
 }
-fn paint_workspaces(
-    p: &egui::Painter,
-    area: Rect,
-    assigned: &[&Workspace],
-    scenes: &[live::Workspace],
-    color: Color32,
-) {
-    if assigned.is_empty() {
-        return;
-    }
-    let columns = (assigned.len() as f32).sqrt().ceil() as usize;
-    let rows = assigned.len().div_ceil(columns);
-    let gap = 8.;
-    let size = Vec2::new(
-        (area.width() - gap * (columns - 1) as f32) / columns as f32,
-        (area.height() - gap * (rows - 1) as f32) / rows as f32,
-    );
-    if size.x < 6. || size.y < 6. {
-        return;
-    }
-    for (i, w) in assigned.iter().enumerate() {
-        let tile = Rect::from_min_size(
-            area.min
-                + Vec2::new(
-                    (i % columns) as f32 * (size.x + gap),
-                    (i / columns) as f32 * (size.y + gap),
-                ),
-            size,
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn scrolling_over_display_pixels_zooms_without_editing_the_layout() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, true).unwrap();
+        let original = serde_json::to_string(&app.layout).unwrap();
+        let input = |events| egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280., 800.))),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input(vec![]), |ctx| app.draw(ctx));
+        let _ = ctx.run(
+            input(vec![egui::Event::PointerMoved(Pos2::new(450., 400.))]),
+            |ctx| app.draw(ctx),
         );
-        p.rect_filled(tile, 4., BG);
-        p.rect_stroke(tile, 4., Stroke::new(1_f32, LINE), StrokeKind::Inside);
-        let clip = p.with_clip_rect(tile.shrink(2.));
-        clip.text(
-            tile.min + Vec2::splat(6.),
-            Align2::LEFT_TOP,
-            &w.name,
-            FontId::proportional(10.),
-            color,
+        let _ = ctx.run(
+            input(vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0., 100.),
+                modifiers: egui::Modifiers::NONE,
+            }]),
+            |ctx| app.draw(ctx),
         );
-        let viewport =
-            Rect::from_min_max(tile.min + Vec2::new(5., 23.), tile.max - Vec2::splat(5.));
-        if viewport.height() < 4. {
-            continue;
-        }
-        if let Some(scene) = scenes.iter().find(|s| s.name == w.name) {
-            let scale = (viewport.width() / scene.rect.width.max(1.))
-                .min(viewport.height() / scene.rect.height.max(1.));
-            let origin =
-                viewport.center() - Vec2::new(scene.rect.width, scene.rect.height) * scale / 2.;
-            let clip = clip.with_clip_rect(viewport);
-            for window in &scene.windows {
-                let r = Rect::from_min_size(
-                    origin
-                        + Vec2::new(window.rect.x - scene.rect.x, window.rect.y - scene.rect.y)
-                            * scale,
-                    Vec2::new(window.rect.width, window.rect.height) * scale,
-                )
-                .shrink(1.);
-                if !r.is_positive() {
-                    continue;
-                }
-                clip.rect_filled(
-                    r,
-                    2.,
-                    if window.floating {
-                        Color32::from_rgb(57, 48, 66)
-                    } else {
-                        Color32::from_rgb(40, 53, 63)
-                    },
-                );
-                clip.rect_stroke(
-                    r,
-                    2.,
-                    Stroke::new(1_f32, if window.focused { color } else { LINE }),
-                    StrokeKind::Inside,
-                );
-                if r.width() > 45. && r.height() > 16. {
-                    clip.with_clip_rect(r.shrink(3.)).text(
-                        r.center(),
-                        Align2::CENTER_CENTER,
-                        &window.title,
-                        FontId::proportional(9.),
-                        TEXT,
-                    );
-                }
-            }
-        }
+        assert!(
+            app.zoom > 1.,
+            "Wheel events over a display must reach the canvas"
+        );
+        assert_eq!(serde_json::to_string(&app.layout).unwrap(), original);
     }
-}
-fn demo_scenes() -> Vec<live::Workspace> {
-    let geometry = |x, y, width, height| live::Geometry {
-        x,
-        y,
-        width,
-        height,
-    };
-    [
-        (
-            "1: code",
-            "DP-1",
-            vec![
-                ("Editor", 0., 0., 1700., 1440.),
-                ("Terminal", 1700., 0., 860., 1440.),
-            ],
-        ),
-        ("2: web", "DP-1", vec![("Browser", 0., 0., 2560., 1440.)]),
-        ("3: chat", "eDP-1", vec![("Chat", 0., 0., 2560., 1440.)]),
-    ]
-    .into_iter()
-    .map(|(name, output, windows)| live::Workspace {
-        name: name.into(),
-        output: output.into(),
-        rect: geometry(0., 0., 2560., 1440.),
-        windows: windows
-            .into_iter()
-            .enumerate()
-            .map(|(i, (title, x, y, w, h))| live::Window {
-                title: title.into(),
-                rect: geometry(x, y, w, h),
-                focused: i == 0,
-                floating: false,
-            })
-            .collect(),
-    })
-    .collect()
 }

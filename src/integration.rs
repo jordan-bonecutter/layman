@@ -65,22 +65,13 @@ impl Patch {
                     == fs::canonicalize(include).unwrap_or_else(|_| include.to_path_buf())
             })
         };
-        let lines: Vec<_> = before.lines().collect();
-        // A direct include at the end is already installed. Earlier occurrences
-        // are moved to the end so later output commands cannot override it.
-        let last = lines
-            .iter()
-            .rposition(|l| !l.trim().is_empty() && !l.trim().starts_with('#'));
-        let count = lines.iter().filter(|l| matches(l)).count();
-        let after = if count == 1 && last.is_some_and(|i| matches(lines[i])) {
+        // Existing includes are user configuration: never remove or relocate them.
+        let after = if before.lines().any(matches) {
             before.clone()
         } else {
-            let mut after = String::new();
-            for l in lines {
-                if !matches(l) {
-                    after.push_str(l);
-                    after.push('\n');
-                }
+            let mut after = before.clone();
+            if !after.is_empty() && !after.ends_with('\n') {
+                after.push('\n');
             }
             if !after.is_empty() && !after.ends_with("\n\n") {
                 after.push('\n');
@@ -99,6 +90,9 @@ impl Patch {
         self.before == self.after
     }
     pub fn diff(&self) -> Vec<(char, String)> {
+        if self.installed() {
+            return Vec::new();
+        }
         let a: Vec<_> = self.before.lines().collect();
         let b: Vec<_> = self.after.lines().collect();
         let common = a.iter().zip(&b).take_while(|(a, b)| a == b).count();

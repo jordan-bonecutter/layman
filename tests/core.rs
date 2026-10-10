@@ -196,54 +196,79 @@ fn config_patch_is_reviewable_idempotent_and_refuses_stale_edits() {
     );
     std::fs::write(&config, &duplicate).unwrap();
     let patch = Patch::check(&config, &include).unwrap();
-    assert_eq!(
-        patch
-            .after
-            .lines()
-            .filter(|l| l.starts_with("include"))
-            .count(),
-        1
+    assert!(patch.installed());
+    assert_eq!(patch.after, duplicate);
+    assert!(patch.diff().is_empty());
+    assert!(patch.apply().is_err());
+    // An existing early include is also left byte-for-byte intact.
+    let early = format!(
+        "include \"{}\" # layout\noutput DP-1 scale 2\n",
+        include.display()
     );
-    assert!(patch.after.lines().last().unwrap().starts_with("include"));
-    let diff = patch.diff();
-    // Reconstruct the changed section: context+removed is old, context+added is new.
-    assert_eq!(
-        diff.iter()
-            .skip(3)
-            .filter(|(k, _)| *k != '+')
-            .map(|(_, l)| l.as_str())
-            .collect::<Vec<_>>(),
-        duplicate.lines().collect::<Vec<_>>()
-    );
-    patch.apply().unwrap();
-    assert!(Patch::check(&config, &include).unwrap().installed());
+    std::fs::write(&config, &early).unwrap();
+    let patch = Patch::check(&config, &include).unwrap();
+    assert!(patch.installed());
+    assert_eq!(patch.after, early);
+    // An append diff contains additions only, even if the original lacks a newline.
+    std::fs::write(&config, "set $mod Mod4").unwrap();
+    let patch = Patch::check(&config, &include).unwrap();
+    assert!(!patch.diff().iter().any(|(kind, _)| *kind == '-'));
+    assert!(patch.after.starts_with("set $mod Mod4\n"));
 }
 
 #[test]
-fn live_workspace_previews_use_actual_window_geometry_and_include_floating_windows() {
-    let tree:layman::live::Node=serde_json::from_value(serde_json::json!({
-        "type":"root","nodes":[{"type":"output","name":"DP-1","nodes":[
-            {"type":"workspace","name":"1","rect":{"x":100,"y":20,"width":1000,"height":700},"nodes":[
-                {"id":9,"type":"con","app_id":"terminal","focused":true,"rect":{"x":100,"y":20,"width":600,"height":700}}
-            ],"floating_nodes":[{"type":"con","window":42,"name":"Dialog","rect":{"x":350,"y":200,"width":300,"height":150}}]},
-            {"type":"workspace","name":"__i3_scratch"}
-        ]}]
-    })).unwrap();
-    let workspaces = layman::live::workspaces(&tree);
-    assert_eq!(workspaces.len(), 1);
-    let w = &workspaces[0];
-    assert_eq!(w.output, "DP-1");
-    assert_eq!(w.rect.x, 100.);
-    assert_eq!(w.windows.len(), 2);
-    assert!(w.windows[0].focused);
-    assert_eq!(w.windows[0].rect.width, 600.);
-    assert!(w.windows[1].floating);
-    assert_eq!(w.windows[1].title, "Dialog");
-    for angle in [0, 90, 180, 270] {
-        for flipped in [false, true] {
-            assert!(
-                layman::model::TRANSFORMS.contains(&layman::ui::transform(angle, flipped).as_str())
-            );
-        }
+fn screen_pixels_handle_stride_formats_rotation_mirroring_and_inversion() {
+    use eframe::egui::Color32;
+    use layman::capture::thumbnail;
+    use wayland_client::protocol::wl_shm::Format;
+    // A non-square, asymmetric image with padding at the end of each row.
+    let data: Vec<u8> = [1_u32, 2, 3, 999, 4, 5, 6, 999]
+        .into_iter()
+        .flat_map(u32::to_ne_bytes)
+        .collect();
+    let expected = [
+        vec![1, 2, 3, 4, 5, 6],
+        vec![4, 1, 5, 2, 6, 3],
+        vec![6, 5, 4, 3, 2, 1],
+        vec![3, 6, 2, 5, 1, 4],
+        vec![3, 2, 1, 6, 5, 4],
+        vec![1, 4, 2, 5, 3, 6],
+        vec![4, 5, 6, 1, 2, 3],
+        vec![6, 3, 5, 2, 4, 1],
+    ];
+    for (transform, expected) in expected.iter().enumerate() {
+        let image = thumbnail(&data, 3, 2, 16, Format::Xrgb8888, false, transform as u32).unwrap();
+        assert_eq!(image.size, if transform % 2 == 0 { [3, 2] } else { [2, 3] });
+        assert_eq!(
+            image.pixels.iter().map(|p| p.b()).collect::<Vec<_>>(),
+            *expected
+        );
     }
+    let inverted = thumbnail(&data, 3, 2, 16, Format::Xrgb8888, true, 0).unwrap();
+    assert_eq!(
+        inverted.pixels.iter().map(|p| p.b()).collect::<Vec<_>>(),
+        [4, 5, 6, 1, 2, 3]
+    );
+    for (format, value) in [
+        (Format::Xrgb8888, 0xff123456_u32),
+        (Format::Xbgr8888, 0xff563412),
+        (Format::Bgrx8888, 0x563412ff),
+        (Format::Rgbx8888, 0x123456ff),
+    ] {
+        let image = thumbnail(&value.to_ne_bytes(), 1, 1, 4, format, false, 0).unwrap();
+        assert_eq!(image.pixels[0], Color32::from_rgb(0x12, 0x34, 0x56));
+    }
+    let image = thumbnail(
+        &0x3ff00000_u32.to_ne_bytes(),
+        1,
+        1,
+        4,
+        Format::Xrgb2101010,
+        false,
+        0,
+    )
+    .unwrap();
+    assert_eq!(image.pixels[0], Color32::RED);
+    assert!(thumbnail(&data, 3, 2, 8, Format::Xrgb8888, false, 0).is_err());
+    assert!(thumbnail(&data[..4], 3, 2, 16, Format::Xrgb8888, false, 0).is_err());
 }

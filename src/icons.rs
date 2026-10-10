@@ -1,3 +1,4 @@
+use crate::theme::*;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 
 #[derive(Clone, Copy)]
@@ -19,34 +20,74 @@ pub enum Icon {
 }
 
 pub fn button(ui: &mut egui::Ui, icon: Icon, label: &str, active: bool) -> egui::Response {
-    let response = ui.add(
+    enabled_button(ui, icon, label, active, true)
+}
+pub fn enabled_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    active: bool,
+    enabled: bool,
+) -> egui::Response {
+    let enabled = enabled && ui.is_enabled();
+    let response = ui.add_enabled(
+        enabled,
         egui::Button::new("")
             .min_size(Vec2::splat(36.))
-            .fill(if active {
-                Color32::from_rgb(43, 77, 66)
-            } else {
-                Color32::TRANSPARENT
-            })
-            .stroke(if active {
-                Stroke::new(1_f32, Color32::from_rgb(115, 192, 162))
-            } else {
-                Stroke::NONE
-            })
-            .corner_radius(8.),
+            .fill(if active { SELECTED } else { PANEL })
+            .stroke(Stroke::new(1_f32, if active { ACCENT } else { LINE }))
+            .corner_radius(6.),
     );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
-    let color = if !ui.is_enabled() {
-        Color32::from_rgb(73, 86, 96)
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    let color = if !enabled {
+        LINE
     } else if active {
-        Color32::from_rgb(150, 235, 200)
+        ACCENT
     } else {
-        Color32::from_rgb(187, 202, 215)
+        TEXT
     };
     paint(ui.painter(), response.rect.shrink(7.), icon, color);
     response.on_hover_text(label)
 }
+/// Compact, keyboard-accessible switch with a predictable hit target.
+pub fn switch(ui: &mut egui::Ui, checked: &mut bool, label: &str) -> egui::Response {
+    let (rect, mut response) = ui.allocate_exact_size(Vec2::new(36., 26.), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Checkbox, ui.is_enabled(), label)
+    });
+    if response.clicked() {
+        *checked = !*checked;
+        response.mark_changed();
+    }
+    let track = rect.shrink2(Vec2::new(0., 3.));
+    let enabled = ui.is_enabled();
+    ui.painter()
+        .rect_filled(track, 10., if *checked && enabled { SELECTED } else { BG });
+    ui.painter().rect_stroke(
+        track,
+        10.,
+        Stroke::new(1_f32, if *checked && enabled { ACCENT } else { LINE }),
+        StrokeKind::Inside,
+    );
+    let x = if *checked {
+        track.right() - 10.
+    } else {
+        track.left() + 10.
+    };
+    ui.painter().circle_filled(
+        Pos2::new(x, track.center().y),
+        6.,
+        if !enabled {
+            LINE
+        } else if *checked {
+            ACCENT
+        } else {
+            MUTED
+        },
+    );
+    response.on_hover_text(label)
+}
+
 pub fn paint(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
     let s = Stroke::new(1.6_f32, color);
     let point = |x: f32, y: f32| Pos2::new(r.left() + r.width() * x, r.top() + r.height() * y);
@@ -65,8 +106,8 @@ pub fn paint(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
         Icon::Row => {
             screen((0., 0.38), (0.38, 0.82));
             screen((0.46, 0.14), (1., 0.82));
-            line((0.19, 0.82), (0.19, 0.97));
-            line((0.73, 0.82), (0.73, 0.97));
+            line((0., 0.02), (1., 0.02));
+            line((0., 0.98), (1., 0.98));
         }
         Icon::Fit => {
             for (x, y, dx, dy) in [
@@ -178,16 +219,12 @@ pub fn paint(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
 }
 pub fn scale(ui: &mut egui::Ui, value: &mut f64) {
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Scale")
-                .color(Color32::from_rgb(147, 160, 177))
-                .size(12.),
-        );
+        ui.label(egui::RichText::new("Scale").color(MUTED).size(12.));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(format!("{value:.2}×"))
                     .monospace()
-                    .color(Color32::from_rgb(150, 235, 200)),
+                    .color(ACCENT),
             );
         });
     });
@@ -216,21 +253,21 @@ pub fn scale(ui: &mut egui::Ui, value: &mut f64) {
         let y = r.center().y;
         p.line_segment(
             [Pos2::new(rail.left(), y), Pos2::new(rail.right(), y)],
-            Stroke::new(4_f32, Color32::from_rgb(48, 59, 70)),
+            Stroke::new(4_f32, LINE),
         );
         for i in 0..=14 {
             let x = rail.left() + rail.width() * i as f32 / 14.;
             p.line_segment(
                 [Pos2::new(x, y + 7.), Pos2::new(x, y + 10.)],
-                Stroke::new(1_f32, Color32::from_rgb(80, 96, 110)),
+                Stroke::new(1_f32, MUTED),
             );
         }
         let x = rail.left() + rail.width() * ((*value - 0.5) / 3.5) as f32;
         p.line_segment(
             [Pos2::new(rail.left(), y), Pos2::new(x, y)],
-            Stroke::new(4_f32, Color32::from_rgb(150, 235, 200)),
+            Stroke::new(4_f32, ACCENT),
         );
-        p.circle_filled(Pos2::new(x, y), 7., Color32::from_rgb(150, 235, 200));
+        p.circle_filled(Pos2::new(x, y), 7., ACCENT);
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Slider, ui.is_enabled(), "Display scale")
         });

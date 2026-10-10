@@ -269,13 +269,39 @@ fn real_headless_sway_ui_persistence_and_rollback() -> Result<()> {
             .path();
         let pointer = support::Pointer::new(&wayland_path)?;
         sway.capture("headless-ui.png")?;
-        let tree: layman::live::Node = ipc::request_at(&sway.socket, 4, "")?;
+        let mut capture = layman::capture::Capturer::at(&wayland_path)?;
+        let screens = capture.screens()?;
+        ensure!(screens.len() == 2, "Expected two real screen buffers");
+        let first = screens
+            .iter()
+            .find(|s| s.name == "HEADLESS-1")
+            .context("First screen")?;
         ensure!(
-            layman::live::workspaces(&tree)
-                .iter()
-                .any(|w| w.windows.iter().any(|window| window.rect.width > 0.)),
-            "Live preview has no real window geometry"
+            first.image.size == [640, 400],
+            "Unexpected captured dimensions"
         );
+        let colors: std::collections::HashSet<_> = first.image.pixels.iter().collect();
+        ensure!(
+            colors.len() > 20,
+            "Screen capture did not contain rendered UI pixels"
+        );
+        sway.command("output HEADLESS-2 disable")?;
+        std::thread::sleep(Duration::from_millis(200));
+        ensure!(
+            capture.screens()?.len() == 1,
+            "Disabled output retained stale pixels"
+        );
+        ensure!(
+            sway.snapshot()?.outputs.iter().any(|o| !o.active),
+            "Disabled displays cannot be inspected/refreshed"
+        );
+        sway.command("output HEADLESS-2 enable")?;
+        std::thread::sleep(Duration::from_millis(200));
+        ensure!(
+            capture.screens()?.len() == 2,
+            "Capture did not recover after re-enabling an output"
+        );
+        println!("✓ real Wayland screen pixels captured; disabled/re-enabled displays recover");
         // Drag the lower display in the actual canvas, preview it, then revert.
         pointer.motion(500, 550)?;
         pointer.button(true)?;
@@ -293,7 +319,18 @@ fn real_headless_sway_ui_persistence_and_rollback() -> Result<()> {
         equivalent_outputs(&candidate, &sway.snapshot()?);
         println!("✓ actual canvas drag previews correctly; Revert restores the layout");
         pointer.click(1200, 766)?; // Reset draft edits.
-        pointer.click(84, 34)?; // Arrange in a row, through the actual UI.
+        sway.command("output HEADLESS-2 pos 300 800")?;
+        pointer.click(172, 80)?; // Refresh must read external changes into the draft.
+        std::thread::sleep(Duration::from_millis(300));
+        pointer.click(1246, 766)?;
+        let refreshed = sway.snapshot()?;
+        ensure!(
+            refreshed.outputs[1].rect.x == 300 && refreshed.outputs[1].rect.y == 800,
+            "Refresh did not adopt the compositor's current layout"
+        );
+        pointer.click(1200, 766)?;
+        println!("✓ Refresh adopts external output changes without freezing the UI");
+        pointer.click(34, 80)?; // Arrange in a row, through the actual UI.
         sway.capture("headless-ui.png")?;
         println!("✓ native Wayland/OpenGL UI rendered; artifacts/headless-ui.png");
         pointer.click(1246, 766)?; // Preview layout.
@@ -325,11 +362,22 @@ fn real_headless_sway_ui_persistence_and_rollback() -> Result<()> {
         // Same integration path as the dialog, in an isolated config. No desktop writes.
         let patch = layman::integration::Patch::check(&sway.config, &saved_dir.join("sway.conf"))?;
         ensure!(!patch.installed(), "Expected an include diff");
-        pointer.click(65, 435)?; // Apply the reviewed diff in the actual save dialog.
+        pointer.click(65, 481)?; // Apply the reviewed diff in the actual save dialog.
         ensure!(
             layman::integration::Patch::check(&sway.config, &saved_dir.join("sway.conf"))?
                 .installed(),
             "Include was not installed"
+        );
+        pointer.click(1246, 766)?; // Save again with the include already present.
+        pointer.click(1246, 766)?;
+        let screens = capture.screens()?;
+        let first = screens
+            .iter()
+            .find(|s| s.name == "HEADLESS-1")
+            .context("First screen")?;
+        ensure!(
+            first.image.pixels[100 * 640 + 50] == layman::theme::BG,
+            "Setup dialog was shown despite an existing include"
         );
         sway.command("reload")?;
         std::thread::sleep(Duration::from_millis(400));
