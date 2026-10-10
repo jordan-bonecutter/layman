@@ -23,6 +23,7 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 pub struct Screen {
     pub name: String,
     pub image: ColorImage,
+    pub transform: u32,
 }
 struct Output {
     global: u32,
@@ -365,7 +366,11 @@ impl Capturer {
                 )
             })();
             match result {
-                Ok(image) => screens.push(Screen { name, image }),
+                Ok(image) => screens.push(Screen {
+                    name,
+                    image,
+                    transform,
+                }),
                 Err(e) => errors.push(format!("{name}: {e:#}")),
             }
         }

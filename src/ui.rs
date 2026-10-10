@@ -26,6 +26,57 @@ struct Drag {
     pointer_start: Pos2,
 }
 
+struct ScreenTexture {
+    handle: egui::TextureHandle,
+    transform: u32,
+}
+
+// Map draft coordinates back to native panel coordinates, then into the
+// captured image. Captures already include the compositor's live transform.
+fn preview_uv(mut point: Pos2, captured: u32, draft: u32) -> Pos2 {
+    if draft >= 4 {
+        point.x = 1. - point.x;
+    }
+    for _ in 0..draft % 4 {
+        point = Pos2::new(point.y, 1. - point.x);
+    }
+    for _ in 0..captured % 4 {
+        point = Pos2::new(1. - point.y, point.x);
+    }
+    if captured >= 4 {
+        point.x = 1. - point.x;
+    }
+    point
+}
+
+fn preview_mesh(texture: &ScreenTexture, rect: Rect, draft: &str) -> egui::Mesh {
+    let draft = crate::model::TRANSFORMS
+        .iter()
+        .position(|t| *t == draft)
+        .unwrap_or(0) as u32;
+    let mut size = texture.handle.size_vec2();
+    if (texture.transform % 2) != (draft % 2) {
+        size = Vec2::new(size.y, size.x);
+    }
+    let scale = (rect.width() / size.x).min(rect.height() / size.y);
+    let image_rect = Rect::from_center_size(rect.center(), size * scale);
+    let mut mesh = egui::Mesh::with_texture(texture.handle.id());
+    for (pos, uv) in [
+        (image_rect.left_top(), Pos2::new(0., 0.)),
+        (image_rect.right_top(), Pos2::new(1., 0.)),
+        (image_rect.left_bottom(), Pos2::new(0., 1.)),
+        (image_rect.right_bottom(), Pos2::new(1., 1.)),
+    ] {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos,
+            uv: preview_uv(uv, texture.transform, draft),
+            color: Color32::WHITE,
+        });
+    }
+    mesh.indices.extend_from_slice(&[0, 1, 2, 2, 1, 3]);
+    mesh
+}
+
 pub struct App {
     layout: Layout,
     baseline: Layout,
@@ -41,7 +92,7 @@ pub struct App {
     drag: Option<Drag>,
     help: bool,
     new_workspace: String,
-    textures: std::collections::HashMap<String, egui::TextureHandle>,
+    textures: std::collections::HashMap<String, ScreenTexture>,
     receiver: Option<std::sync::mpsc::Receiver<anyhow::Result<Vec<capture::Screen>>>>,
     refresh_receiver: Option<std::sync::mpsc::Receiver<anyhow::Result<Layout>>>,
     live_error: Option<String>,
@@ -208,11 +259,19 @@ impl App {
                         self.textures.retain(|name, _| names.contains(name));
                         for screen in screens {
                             if let Some(texture) = self.textures.get_mut(&screen.name) {
-                                texture.set(screen.image, PREVIEW_FILTER);
+                                texture.handle.set(screen.image, PREVIEW_FILTER);
+                                texture.transform = screen.transform;
                             } else {
                                 self.textures.insert(
                                     screen.name.clone(),
-                                    ctx.load_texture(screen.name, screen.image, PREVIEW_FILTER),
+                                    ScreenTexture {
+                                        handle: ctx.load_texture(
+                                            screen.name,
+                                            screen.image,
+                                            PREVIEW_FILTER,
+                                        ),
+                                        transform: screen.transform,
+                                    },
                                 );
                             }
                         }
@@ -741,12 +800,7 @@ impl App {
             // Keep the border inside its own display so touching monitors never cover each other.
             painter.rect_filled(r, 0., PANEL);
             if let Some(texture) = self.textures.get(&o.name) {
-                painter.image(
-                    texture.id(),
-                    r,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
-                    Color32::WHITE,
-                );
+                painter.add(egui::Shape::mesh(preview_mesh(texture, r, &o.transform)));
             } else {
                 painter.text(
                     r.center(),
