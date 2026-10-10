@@ -6,8 +6,6 @@ pub enum Icon {
     Row,
     Fit,
     Snap,
-    Minus,
-    Plus,
     Refresh,
     Load,
     Reset,
@@ -145,12 +143,6 @@ pub fn paint(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
             path(&[(5., 9.), (9., 9.)]);
             path(&[(15., 9.), (19., 9.)]);
         }
-        Icon::Minus | Icon::Plus => {
-            path(&[(5., 12.), (19., 12.)]);
-            if matches!(icon, Icon::Plus) {
-                path(&[(12., 5.), (12., 19.)]);
-            }
-        }
         Icon::Refresh => {
             arc(12., 12., 8., -150., -20.);
             path(&[(19.5, 3.), (19.5, 9.3), (13.5, 9.3)]);
@@ -221,19 +213,14 @@ pub fn scale(ui: &mut egui::Ui, value: &mut f64) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Scale").color(MUTED).size(12.));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(format!("{value:.2}×"))
-                    .monospace()
-                    .color(ACCENT),
-            );
+            ui.label(egui::RichText::new(format!("{value:.2}×")).color(ACCENT));
         });
     });
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.;
-        if button(ui, Icon::Minus, "Decrease scale by 0.25", false).clicked() {
-            *value = (*value - 0.25).max(0.5);
-        }
-        let (r, response) = ui.allocate_exact_size(Vec2::new(164., 36.), Sense::click_and_drag());
+        let (r, response) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), 36.),
+            Sense::click_and_drag(),
+        );
         let rail = r.shrink2(Vec2::new(8., 0.));
         if (response.clicked() || response.dragged())
             && let Some(pos) = response.interact_pointer_pos()
@@ -272,8 +259,5 @@ pub fn scale(ui: &mut egui::Ui, value: &mut f64) {
             egui::WidgetInfo::labeled(egui::WidgetType::Slider, ui.is_enabled(), "Display scale")
         });
         response.on_hover_text("Scale · 0.25× steps");
-        if button(ui, Icon::Plus, "Increase scale by 0.25", false).clicked() {
-            *value = (*value + 0.25).min(4.);
-        }
     });
 }

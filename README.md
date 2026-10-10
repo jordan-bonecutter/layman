@@ -23,9 +23,22 @@ cargo install --path . --locked
 layman
 ```
 
+To add Layman to your application launcher with its logo (requires Python 3):
+
+```sh
+python3 packaging/install-desktop-entry.py
+# Or point the launcher at a different installed binary:
+python3 packaging/install-desktop-entry.py /absolute/path/to/layman
+```
+
+The script installs the desktop entry and SVG logo under `$XDG_DATA_HOME`
+(default `~/.local/share`), requires no root access, and records the binary's
+absolute path so the launcher works without Cargo on the desktop's PATH.
+Run it again after moving the binary to update the entry.
+
 Drag monitors to match your desk. Edges snap; Alt bypasses snapping. Select a
 monitor to edit its advertised resolution/refresh and fractional scale. The scale
-control snaps to 0.25× increments, with minus/plus buttons for precise changes.
+slider snaps to 0.25× increments; focus it and use the arrow keys for precise changes.
 Four orientation icons select 0°, 90°, 180°, or 270°; the Mirror switch flips
 horizontally.
 Arrow keys over the canvas nudge the selected monitor; Shift nudges by 10 pixels.
@@ -135,3 +148,10 @@ rendering without a display server. CI runs both suites.
 Protocol and behavior references: [Sway IPC](https://github.com/swaywm/sway/blob/master/sway/sway-ipc.7.scd),
 [output commands](https://github.com/swaywm/sway/blob/master/sway/sway-output.5.scd),
 and [workspace/include/exec_always commands](https://github.com/swaywm/sway/blob/master/sway/sway.5.scd).
+
+## Font
+
+The UI embeds [Inter Regular](https://github.com/rsms/inter/releases/tag/v4.1),
+licensed under the SIL Open Font License 1.1. Its copyright and license are
+included in [assets/fonts/LICENSE.txt](assets/fonts/LICENSE.txt) and embedded
+in the binary, accessible with `layman --font-license`.

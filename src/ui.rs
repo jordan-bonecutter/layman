@@ -50,6 +50,17 @@ pub struct App {
 }
 impl App {
     pub fn new(ctx: &egui::Context, demo: bool) -> anyhow::Result<Self> {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "Inter".into(),
+            egui::FontData::from_static(include_bytes!("../assets/fonts/Inter-Regular.ttf")).into(),
+        );
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Proportional)
+            .unwrap()
+            .insert(0, "Inter".into());
+        ctx.set_fonts(fonts);
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = PANEL;
         visuals.window_fill = PANEL;
@@ -562,14 +573,10 @@ impl App {
         });
         ui.add_space(12.);
         let mut mirrored = flipped;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Mirror").size(12.).color(MUTED));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icons::switch(ui, &mut mirrored, "Mirror display").changed() {
-                    o.transform = transform(angle, mirrored);
-                }
-            });
-        });
+        ui.label(RichText::new("Mirror").size(12.).color(MUTED));
+        if icons::switch(ui, &mut mirrored, "Mirror display").changed() {
+            o.transform = transform(angle, mirrored);
+        }
         if let Err(e) = self.layout.validate() {
             ui.add_space(12.);
             ui.label(RichText::new(e.to_string()).color(WARN));

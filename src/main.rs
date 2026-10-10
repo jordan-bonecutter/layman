@@ -15,8 +15,12 @@ fn run() -> Result<()> {
     match args.first().and_then(|s| s.to_str()) {
         Some("--help" | "-h") => {
             println!(
-                "Layman — native display layouts for Sway\n\n  layman              Open the editor\n  layman --demo       Explore with sample displays (no Sway or writes)\n  layman --inspect    Print current outputs/workspaces as JSON (read-only)\n  layman --restore    Apply the saved layout and existing workspace placement\n  layman --print-config   Print the include line to add to your Sway config\n\nLayouts are saved under $XDG_CONFIG_HOME/layman (default ~/.config/layman).\nPreview changes revert after 20 seconds unless confirmed."
+                "Layman — native display layouts for Sway\n\n  layman              Open the editor\n  layman --demo       Explore with sample displays (no Sway or writes)\n  layman --inspect    Print current outputs/workspaces as JSON (read-only)\n  layman --restore    Apply the saved layout and existing workspace placement\n  layman --print-config   Print the include line to add to your Sway config\n  layman --font-license   Show the bundled Inter font copyright and license\n\nLayouts are saved under $XDG_CONFIG_HOME/layman (default ~/.config/layman).\nPreview changes revert after 20 seconds unless confirmed."
             );
+            return Ok(());
+        }
+        Some("--font-license") if args.len() == 1 => {
+            print!("{}", include_str!("../assets/fonts/LICENSE.txt"));
             return Ok(());
         }
         Some("--inspect") if args.len() == 1 => {

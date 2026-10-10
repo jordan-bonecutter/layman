@@ -3,6 +3,7 @@ Type=Application
 Name=Layman
 Comment=Arrange Sway displays and workspaces
 Exec=layman
+Icon=dev.layman.Layman
 Terminal=false
 Categories=Settings;HardwareSettings;
 Keywords=sway;display;monitor;layout;
