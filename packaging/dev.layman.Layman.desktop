@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Layman
+Comment=Arrange Sway displays and workspaces
+Exec=layman
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=sway;display;monitor;layout;
+StartupWMClass=dev.layman.Layman
