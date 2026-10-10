@@ -115,3 +115,14 @@ fn move_workspaces(layout: &Layout) -> Result<()> {
     }
     result
 }
+
+pub fn tree() -> Result<crate::live::Node> {
+    request(4, "")
+}
+pub fn config_path() -> Result<PathBuf> {
+    #[derive(Deserialize)]
+    struct Version {
+        loaded_config_file_name: PathBuf,
+    }
+    Ok(request::<Version>(7, "")?.loaded_config_file_name)
+}

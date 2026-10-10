@@ -116,6 +116,29 @@ impl Sway {
         }
         c
     }
+    fn capture(&self, name: &str) -> Result<()> {
+        let artifacts = Path::new(env!("CARGO_MANIFEST_DIR")).join("artifacts");
+        fs::create_dir_all(&artifacts)?;
+        let wayland = fs::read_dir(&self.runtime)?
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                e.file_name().to_string_lossy().starts_with("wayland-")
+                    && !e.file_name().to_string_lossy().ends_with(".lock")
+            })
+            .context("Wayland socket")?
+            .file_name();
+        ensure!(
+            Command::new("grim")
+                .args(["-o", "HEADLESS-1"])
+                .arg(artifacts.join(name))
+                .env("XDG_RUNTIME_DIR", &self.runtime)
+                .env("WAYLAND_DISPLAY", wayland)
+                .status()?
+                .success(),
+            "Screenshot failed"
+        );
+        Ok(())
+    }
     fn snapshot(&self) -> Result<Layout> {
         let output = self.app().arg("--inspect").output()?;
         ensure!(
@@ -245,6 +268,14 @@ fn real_headless_sway_ui_persistence_and_rollback() -> Result<()> {
             .context("Wayland socket")?
             .path();
         let pointer = support::Pointer::new(&wayland_path)?;
+        sway.capture("headless-ui.png")?;
+        let tree: layman::live::Node = ipc::request_at(&sway.socket, 4, "")?;
+        ensure!(
+            layman::live::workspaces(&tree)
+                .iter()
+                .any(|w| w.windows.iter().any(|window| window.rect.width > 0.)),
+            "Live preview has no real window geometry"
+        );
         // Drag the lower display in the actual canvas, preview it, then revert.
         pointer.motion(500, 550)?;
         pointer.button(true)?;
@@ -252,55 +283,57 @@ fn real_headless_sway_ui_persistence_and_rollback() -> Result<()> {
         pointer.motion(570, 550)?;
         pointer.button(false)?;
         std::thread::sleep(Duration::from_millis(200));
-        pointer.click(1190, 740)?;
+        pointer.click(1246, 766)?;
         let dragged = sway.snapshot()?;
         ensure!(
             dragged.outputs[1].rect.x > 0,
             "Canvas drag did not change the display position"
         );
-        pointer.click(225, 735)?; // Revert now.
+        pointer.click(1200, 766)?; // Revert now.
         equivalent_outputs(&candidate, &sway.snapshot()?);
         println!("✓ actual canvas drag previews correctly; Revert restores the layout");
-        pointer.click(1070, 740)?; // Reset draft edits.
-        pointer.click(90, 210)?; // Arrange in a row, through the actual UI.
-        let artifacts = Path::new(env!("CARGO_MANIFEST_DIR")).join("artifacts");
-        fs::create_dir_all(&artifacts)?;
-        let wayland = fs::read_dir(&sway.runtime)?
-            .filter_map(|e| e.ok())
-            .find(|e| {
-                e.file_name().to_string_lossy().starts_with("wayland-")
-                    && !e.file_name().to_string_lossy().ends_with(".lock")
-            })
-            .unwrap()
-            .file_name();
-        let status = Command::new("grim")
-            .args(["-o", "HEADLESS-1"])
-            .arg(artifacts.join("headless-ui.png"))
-            .env("XDG_RUNTIME_DIR", &sway.runtime)
-            .env("WAYLAND_DISPLAY", &wayland)
-            .status()?;
-        ensure!(status.success(), "Screenshot failed");
+        pointer.click(1200, 766)?; // Reset draft edits.
+        pointer.click(84, 34)?; // Arrange in a row, through the actual UI.
+        sway.capture("headless-ui.png")?;
         println!("✓ native Wayland/OpenGL UI rendered; artifacts/headless-ui.png");
-        pointer.click(1190, 740)?; // Preview layout.
+        pointer.click(1246, 766)?; // Preview layout.
         let row = sway.snapshot()?;
         ensure!(
             row.outputs[1].rect.x == 1280 && row.outputs[1].rect.y == 0,
             "UI Preview did not apply Arrange in a row"
         );
-        let status = Command::new("grim")
-            .args(["-o", "HEADLESS-1"])
-            .arg(artifacts.join("headless-preview.png"))
-            .env("XDG_RUNTIME_DIR", &sway.runtime)
-            .env("WAYLAND_DISPLAY", &wayland)
-            .status()?;
-        ensure!(status.success(), "Preview screenshot failed");
-        pointer.click(350, 735)?; // Keep & save.
+        sway.capture("headless-preview.png")?;
+        // Let the save dialog exercise discovery and diff preview for the running config.
+        let config = fs::read_to_string(&sway.config)?;
+        fs::write(
+            &sway.config,
+            config
+                .lines()
+                .filter(|line| !line.starts_with("include "))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )?;
+        pointer.click(1246, 766)?; // Keep & save.
         let saved = store::load_at(&saved_dir)?.context("UI did not save")?;
         ensure!(
             saved.outputs[1].rect.x == 1280 && saved.outputs[1].rect.y == 0,
             "UI confirmation did not persist the arranged layout"
         );
         println!("✓ actual GUI Arrange → Preview → Keep interaction applies and saves");
+        sway.capture("headless-save-diff.png")?;
+        // Same integration path as the dialog, in an isolated config. No desktop writes.
+        let patch = layman::integration::Patch::check(&sway.config, &saved_dir.join("sway.conf"))?;
+        ensure!(!patch.installed(), "Expected an include diff");
+        pointer.click(65, 435)?; // Apply the reviewed diff in the actual save dialog.
+        ensure!(
+            layman::integration::Patch::check(&sway.config, &saved_dir.join("sway.conf"))?
+                .installed(),
+            "Include was not installed"
+        );
+        sway.command("reload")?;
+        std::thread::sleep(Duration::from_millis(400));
+        println!("✓ config diff installs the include and survives a real Sway reload");
 
         // Move a workspace containing a real Wayland window. Verify the window
         // remains alive and the workspace is assigned to the requested output.

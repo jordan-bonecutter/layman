@@ -24,10 +24,18 @@ layman
 ```
 
 Drag monitors to match your desk. Edges snap; Alt bypasses snapping. Select a
-monitor to edit its advertised resolution/refresh, fractional scale, rotation,
-or exact position in logical pixels. Arrow keys over the canvas nudge the
-selected monitor; Shift nudges by 10 pixels. Middle-drag pans; Fit recenters.
-The workspace tab assigns current and future workspaces to enabled displays.
+monitor to edit its advertised resolution/refresh and fractional scale. The scale
+control snaps to 0.25× increments, with minus/plus buttons for precise changes.
+Four orientation icons select 0°, 90°, 180°, or 270°; the mirror icon toggles flip.
+Arrow keys over the canvas nudge the selected monitor; Shift nudges by 10 pixels.
+Middle-drag pans; the four-corner icon fits the displays to the canvas. All toolbar
+and footer icons have tooltips and keyboard focus.
+
+Each monitor contains live miniatures of its assigned workspaces, showing actual
+window geometry, application labels, floating windows, and focus. These are layout
+previews from Sway's tree, updated every 500 ms on a background thread, rather than
+pixel screenshots of application content. They also follow draft workspace
+assignments. The workspace tab assigns current and future workspaces to displays.
 
 **Preview layout** applies the draft for 20 seconds. **Keep & save** makes it
 persistent; Revert, timeout, or closing/crashing the editor restores the previous
@@ -45,8 +53,14 @@ include ~/.config/layman/sway.conf
 ```
 
 If you use a custom `XDG_CONFIG_HOME`, get the correct absolute include line
-with `layman --print-config`, or copy it from the app's “Reload-proof setup”.
-The app does not edit your Sway config automatically.
+with `layman --print-config`, or copy it from the dialog shown after saving.
+That dialog also checks the running compositor's actual config path, previews
+an include change as a colored diff, and offers **Apply diff**. It recognizes a
+direct include at the end, or moves earlier direct includes after conflicting
+output settings. It preserves permissions, keeps a `config.layman-backup-*` backup
+alongside the config, and refuses to overwrite changes made after the diff was
+shown. It follows a config symlink to its target. Applying the diff does not reload
+Sway; reload when ready. Checking the config is read-only.
 
 Layman writes `layout.json` and `sway.conf` to `$XDG_CONFIG_HOME/layman`, defaulting
 to `~/.config/layman`. The include applies enabled display settings synchronously
@@ -97,7 +111,7 @@ its **own** two-output compositor with a private runtime directory and IPC
 socket, isolates configuration writes, renders the actual native UI, captures
 `artifacts/headless-ui.png` and `headless-preview.png`, tests dragging and
 Arrange → Preview → Keep with a real virtual Wayland pointer, moves a workspace
-with a live Wayland window,
+with a live Wayland window, tests the save dialog's config diff and Apply button,
 checks save/reload, and waits out the real 20-second rollback deadline. It
 never sends commands to your desktop session. Ordinary tests cover IPC framing,
 validation, device matching, logical dimensions/snapping, persistence, and UI

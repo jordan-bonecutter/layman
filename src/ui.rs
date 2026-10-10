@@ -1,6 +1,7 @@
 use crate::{
-    ipc,
-    model::{Layout, Mode, Output, Rect as OutputRect, TRANSFORMS, Workspace, snap},
+    icons::{self, Icon},
+    integration, ipc, live,
+    model::{Layout, Mode, Output, Rect as OutputRect, Workspace, snap},
     preview::Preview,
     store,
 };
@@ -45,6 +46,11 @@ pub struct App {
     drag: Option<Drag>,
     help: bool,
     new_workspace: String,
+    scenes: Vec<live::Workspace>,
+    receiver: Option<std::sync::mpsc::Receiver<anyhow::Result<Vec<live::Workspace>>>>,
+    live_error: Option<String>,
+    config_patch: Option<integration::Patch>,
+    config_message: String,
 }
 impl App {
     pub fn new(ctx: &egui::Context, demo: bool) -> anyhow::Result<Self> {
@@ -79,11 +85,7 @@ impl App {
             selected: 0,
             tab: 0,
             demo,
-            status: if demo {
-                "Demo · explore freely; Sway and saved settings are untouched.".into()
-            } else {
-                "Connected to Sway. Your current layout is ready to edit.".into()
-            },
+            status: String::new(),
             preview: None,
             snapping: true,
             zoom: 1.,
@@ -91,6 +93,15 @@ impl App {
             drag: None,
             help: false,
             new_workspace: String::new(),
+            scenes: if demo { demo_scenes() } else { Vec::new() },
+            receiver: if demo {
+                None
+            } else {
+                Some(live::poll(ctx.clone()))
+            },
+            live_error: None,
+            config_patch: None,
+            config_message: String::new(),
         })
     }
     fn message(&mut self, result: anyhow::Result<()>, success: &str) {
@@ -99,9 +110,6 @@ impl App {
             Err(e) => format!("{e:#}"),
         };
     }
-    fn dirty(&self) -> bool {
-        serde_json::to_string(&self.layout).ok() != serde_json::to_string(&self.baseline).ok()
-    }
     fn refresh(&mut self) {
         match ipc::snapshot() {
             Ok(l) => {
@@ -109,7 +117,7 @@ impl App {
                 self.baseline = l;
                 self.selected = 0;
                 self.fit();
-                self.status = "Read the current layout from Sway.".into();
+                self.status.clear();
             }
             Err(e) => self.status = format!("{e:#}"),
         }
@@ -131,10 +139,7 @@ impl App {
             self.fit();
             Ok(())
         })();
-        self.message(
-            result,
-            "Saved layout loaded into the editor. Preview to apply it.",
-        );
+        self.message(result, "");
     }
     fn fit(&mut self) {
         self.zoom = 1.;
@@ -144,8 +149,7 @@ impl App {
         match Preview::start(&self.layout) {
             Ok(p) => {
                 self.preview = Some(p);
-                self.status =
-                    "Preview is live. Keep it within 20 seconds, or it will revert.".into();
+                self.status.clear();
             }
             Err(e) => self.status = format!("{e:#}"),
         }
@@ -157,85 +161,179 @@ impl App {
                 self.baseline = self.layout.clone();
                 self.help = true;
             }
-            self.message(
-                result,
-                if keep {
-                    "Layout applied and saved. Add the include once to survive Sway reloads."
+            self.message(result, "");
+            if keep && self.help {
+                self.check_config();
+            }
+        }
+    }
+    fn check_config(&mut self) {
+        self.config_patch = None;
+        match integration::check() {
+            Ok(patch) => {
+                self.config_message = if patch.installed() {
+                    "Include already installed.".into()
                 } else {
-                    "Previous layout restored. Your draft is still here."
-                },
-            );
+                    String::new()
+                };
+                self.config_patch = Some(patch);
+            }
+            Err(e) => self.config_message = format!("{e:#}"),
+        }
+    }
+    fn read_live(&mut self) {
+        if let Some(receiver) = &self.receiver {
+            while let Ok(result) = receiver.try_recv() {
+                match result {
+                    Ok(scenes) => {
+                        for scene in &scenes {
+                            if !self.layout.workspaces.iter().any(|w| w.name == scene.name)
+                                && self
+                                    .layout
+                                    .outputs
+                                    .iter()
+                                    .any(|o| o.name == scene.output && o.active)
+                            {
+                                let workspace = Workspace {
+                                    name: scene.name.clone(),
+                                    output: scene.output.clone(),
+                                    focused: false,
+                                };
+                                self.layout.workspaces.push(workspace.clone());
+                                self.baseline.workspaces.push(workspace);
+                            }
+                        }
+                        self.scenes = scenes;
+                        self.live_error = None;
+                    }
+                    Err(e) => self.live_error = Some(format!("Live previews unavailable: {e:#}")),
+                }
+            }
         }
     }
     pub fn draw(&mut self, ctx: &egui::Context) {
+        self.read_live();
         if self.preview.as_ref().is_some_and(|p| p.remaining() == 0) {
             self.finish(false);
         }
         if self.preview.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
-        egui::TopBottomPanel::top("header")
-            .frame(egui::Frame::new().fill(BG).inner_margin(22.))
+        egui::TopBottomPanel::top("toolbar")
+            .frame(egui::Frame::new().fill(BG).inner_margin(16.))
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let (logo, _) = ui.allocate_exact_size(Vec2::new(26., 28.), Sense::hover());
-                    let screen = Rect::from_min_size(
-                        logo.left_top() + Vec2::new(0., 4.),
-                        Vec2::new(18., 14.),
-                    );
-                    ui.painter().rect_stroke(
-                        screen,
-                        3.,
-                        Stroke::new(1.5_f32, MINT),
-                        StrokeKind::Inside,
-                    );
-                    ui.painter().rect_stroke(
-                        screen.translate(Vec2::new(6., 6.)),
-                        3.,
-                        Stroke::new(1.5_f32, MINT),
-                        StrokeKind::Inside,
-                    );
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("layman").size(25.).strong());
-                        ui.label(
-                            RichText::new("A little order for your desktop.")
-                                .size(12.)
-                                .color(MUTED),
+                ui.add_enabled_ui(self.preview.is_none(), |ui| {
+                    ui.horizontal(|ui| {
+                        let (logo, _) = ui.allocate_exact_size(Vec2::new(26., 36.), Sense::hover());
+                        let screen = Rect::from_min_size(
+                            logo.left_top() + Vec2::new(0., 8.),
+                            Vec2::new(18., 14.),
                         );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Reload-proof setup").clicked() {
-                            self.help = true;
+                        ui.painter().rect_stroke(
+                            screen,
+                            3.,
+                            Stroke::new(1.5_f32, MINT),
+                            StrokeKind::Inside,
+                        );
+                        ui.painter().rect_stroke(
+                            screen.translate(Vec2::new(6., 6.)),
+                            3.,
+                            Stroke::new(1.5_f32, MINT),
+                            StrokeKind::Inside,
+                        );
+                        ui.add_space(14.);
+                        if icons::button(ui, Icon::Row, "Arrange in a row", false).clicked() {
+                            self.layout.horizontal();
+                            self.fit();
                         }
-                        ui.label(
-                            RichText::new(if self.demo { "DEMO" } else { "SWAY CONNECTED" })
-                                .size(11.)
-                                .color(MINT),
-                        );
+                        if icons::button(ui, Icon::Fit, "Fit displays", false).clicked() {
+                            self.fit();
+                        }
+                        if icons::button(
+                            ui,
+                            Icon::Snap,
+                            "Snap display edges · Alt bypasses",
+                            self.snapping,
+                        )
+                        .clicked()
+                        {
+                            self.snapping = !self.snapping;
+                        }
+                        ui.add_space(10.);
+                        if icons::button(ui, Icon::Minus, "Zoom out", false).clicked() {
+                            self.zoom = (self.zoom / 1.2).max(0.3);
+                        }
+                        if icons::button(
+                            ui,
+                            Icon::Zoom,
+                            &format!("Reset zoom · {:.0}%", self.zoom * 100.),
+                            false,
+                        )
+                        .clicked()
+                        {
+                            self.fit();
+                        }
+                        if icons::button(ui, Icon::Plus, "Zoom in", false).clicked() {
+                            self.zoom = (self.zoom * 1.2).min(4.);
+                        }
+                        ui.add_space(10.);
+                        ui.add_enabled_ui(!self.demo, |ui| {
+                            if icons::button(ui, Icon::Refresh, "Refresh displays from Sway", false)
+                                .clicked()
+                            {
+                                self.refresh();
+                            }
+                        });
                     });
                 });
             });
-        egui::TopBottomPanel::bottom("footer").frame(egui::Frame::new().fill(BG).inner_margin(18.)).show(ctx, |ui| {
-            if let Some(p) = &self.preview {
-                let remaining = p.remaining();
+        egui::TopBottomPanel::bottom("footer")
+            .frame(egui::Frame::new().fill(BG).inner_margin(16.))
+            .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("Keep this layout?  {remaining}s")).strong().color(MINT));
-                    if ui.button("Revert now").clicked() { self.finish(false); }
-                    if ui.add(egui::Button::new(RichText::new("Keep & save").color(BG).strong()).fill(MINT)).clicked() { self.finish(true); }
+                    if let Some(p) = &self.preview {
+                        ui.label(
+                            RichText::new(format!("{}s", p.remaining()))
+                                .monospace()
+                                .color(MINT),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if icons::button(ui, Icon::Save, "Keep & save", true).clicked() {
+                                self.finish(true);
+                            }
+                            if icons::button(ui, Icon::Revert, "Revert preview", false).clicked() {
+                                self.finish(false);
+                            }
+                        });
+                    } else {
+                        if !self.status.is_empty() {
+                            ui.label(RichText::new(&self.status).size(12.).color(COLORS[2]));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_enabled_ui(!self.demo, |ui| {
+                                if icons::button(ui, Icon::Preview, "Preview layout", true)
+                                    .clicked()
+                                {
+                                    self.preview();
+                                }
+                            });
+                            if icons::button(ui, Icon::Reset, "Reset edits", false).clicked() {
+                                self.layout = self.baseline.clone();
+                                self.selected = 0;
+                                self.fit();
+                                self.status.clear();
+                            }
+                            ui.add_enabled_ui(!self.demo, |ui| {
+                                if icons::button(ui, Icon::Load, "Load saved layout", false)
+                                    .clicked()
+                                {
+                                    self.load_saved();
+                                }
+                            });
+                        });
+                    }
                 });
-                ui.label(RichText::new("The separate rollback helper restores your displays even if this window closes.").size(12.).color(MUTED));
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(if self.dirty() { "Unsaved changes" } else { "In sync" }).color(if self.dirty() { COLORS[2] } else { MINT }).size(12.));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add_enabled(!self.demo, egui::Button::new(RichText::new("Preview layout").color(BG).strong()).fill(MINT)).clicked() { self.preview(); }
-                        if ui.button("Reset edits").clicked() { self.layout = self.baseline.clone(); self.selected = 0; self.fit(); }
-                        if ui.add_enabled(!self.demo, egui::Button::new("Load saved")).clicked() { self.load_saved(); }
-                    });
-                });
-                ui.label(RichText::new(&self.status).size(12.).color(MUTED));
-            }
-        });
+            });
         egui::SidePanel::right("inspector")
             .exact_width(292.)
             .resizable(false)
@@ -260,70 +358,81 @@ impl App {
             .frame(egui::Frame::new().fill(BG).inner_margin(24.))
             .show(ctx, |ui| {
                 ui.add_enabled_ui(self.preview.is_none(), |ui| {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new("Your space, arranged.").size(24.).strong());
-                            ui.label(
-                                RichText::new(
-                                    "Drag displays to match your desk. Edges snap together.",
-                                )
-                                .color(MUTED)
-                                .size(13.),
-                            );
-                        });
-                    });
-                    ui.add_space(10.);
-                    ui.horizontal(|ui| {
-                        if ui.button("Arrange in a row").clicked() {
-                            self.layout.horizontal();
-                            self.fit();
-                        }
-                        if ui.button("Fit").clicked() {
-                            self.fit();
-                        }
-                        ui.checkbox(&mut self.snapping, "Snap");
-                        if ui.small_button("−").clicked() {
-                            self.zoom = (self.zoom / 1.2).max(0.3);
-                        }
-                        ui.label(
-                            RichText::new(format!("{:.0}%", self.zoom * 100.))
-                                .color(MUTED)
-                                .size(12.),
-                        );
-                        if ui.small_button("+").clicked() {
-                            self.zoom = (self.zoom * 1.2).min(4.);
-                        }
-                        if ui
-                            .add_enabled(!self.demo, egui::Button::new("Refresh Sway"))
-                            .clicked()
-                        {
-                            self.refresh();
-                        }
-                    });
-                    ui.add_space(10.);
-                    let warnings = self.layout.warnings();
-                    for warning in warnings {
+                    for warning in self.layout.warnings() {
                         ui.label(RichText::new(warning).size(12.).color(COLORS[2]));
                     }
-                    ui.add_space(8.);
+                    if let Some(error) = &self.live_error {
+                        ui.label(RichText::new(error).size(12.).color(COLORS[2]));
+                    }
                     self.canvas(ui);
                 });
             });
         if self.help {
-            egui::Window::new("Make it stick").collapsible(false).resizable(false).default_width(530.).open(&mut self.help).show(ctx, |ui| {
-                ui.label(RichText::new("Sway already has everything we need.").size(21.).strong());
-                ui.add_space(8.);
-                ui.label("1. Preview a layout, then choose Keep & save.\n2. Add this line at the very end of your Sway config:\n3. Reload Sway. Your layout will return on every reload.");
-                let line = store::include_line().unwrap_or_else(|e| e.to_string());
-                ui.add_space(8.);
-                ui.code(&line);
-                if ui.button("Copy include line").clicked() { ui.ctx().copy_text(line); }
-                ui.add_space(8.);
-                ui.label(RichText::new("No systemd service. No background daemon.").color(MINT));
-                ui.label("The generated include restores display settings. Its exec_always command moves existing workspaces, carrying their tiled and floating windows with them. Tiling trees stay intact.");
-                ui.label(RichText::new("Keep the installed binary at the same path. Save again after moving it. Place this include after other display/workspace settings.").size(12.).color(MUTED));
-            });
+            self.save_dialog(ctx);
         }
+    }
+    fn save_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = self.help;
+        egui::Window::new("Saved layout")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(590.)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let line = store::include_line().unwrap_or_else(|e| e.to_string());
+                ui.label(
+                    "Include this at the end of your Sway config to restore the layout on reload.",
+                );
+                ui.horizontal(|ui| {
+                    ui.code(&line);
+                    if ui.button("Copy").clicked() {
+                        ui.ctx().copy_text(line.clone());
+                    }
+                });
+                if ui.button("Check Sway config").clicked() {
+                    self.check_config();
+                }
+                if let Some(patch) = &self.config_patch {
+                    ui.label(
+                        RichText::new(patch.path.display().to_string())
+                            .size(12.)
+                            .color(MUTED),
+                    );
+                    if !patch.installed() {
+                        egui::ScrollArea::both().max_height(260.).show(ui, |ui| {
+                            egui::Frame::new()
+                                .fill(BG)
+                                .inner_margin(12.)
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.y = 2.;
+                                    for (kind, line) in patch.diff() {
+                                        let color = match kind {
+                                            '+' => MINT,
+                                            '-' => Color32::from_rgb(246, 153, 153),
+                                            _ => MUTED,
+                                        };
+                                        ui.label(
+                                            RichText::new(format!("{kind}{line}"))
+                                                .monospace()
+                                                .size(12.)
+                                                .color(color),
+                                        );
+                                    }
+                                });
+                        });
+                        if ui.button("Apply diff").clicked() {
+                            match patch.apply() {
+                                Ok(()) => self.check_config(),
+                                Err(e) => self.config_message = format!("{e:#}"),
+                            }
+                        }
+                    }
+                }
+                if !self.config_message.is_empty() {
+                    ui.label(&self.config_message);
+                }
+            });
+        self.help = open;
     }
     fn inspector(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("DISPLAYS").size(11.).color(MUTED));
@@ -367,63 +476,39 @@ impl App {
                 }
             });
         ui.add_space(8.);
-        ui.label(RichText::new("Scale").size(12.).color(MUTED));
-        ui.add(
-            egui::Slider::new(&mut o.scale, 0.5..=4.)
-                .step_by(0.05)
-                .suffix("×"),
-        );
-        ui.add_space(8.);
-        ui.label(RichText::new("Rotation / flip").size(12.).color(MUTED));
-        egui::ComboBox::from_id_salt("rotation")
-            .width(235.)
-            .selected_text(&o.transform)
-            .show_ui(ui, |ui| {
-                for t in TRANSFORMS {
-                    ui.selectable_value(&mut o.transform, t.to_string(), t);
-                }
-            });
-        ui.add_space(8.);
-        ui.label(
-            RichText::new("Position · logical pixels")
-                .size(12.)
-                .color(MUTED),
-        );
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::DragValue::new(&mut o.rect.x)
-                    .speed(10.)
-                    .range(-100000..=100000)
-                    .prefix("X  "),
-            );
-            ui.add(
-                egui::DragValue::new(&mut o.rect.y)
-                    .speed(10.)
-                    .range(-100000..=100000)
-                    .prefix("Y  "),
-            );
-        });
-        let (w, h) = o.size();
-        ui.label(
-            RichText::new(format!("Desktop area: {w} × {h}"))
-                .size(12.)
-                .color(MUTED),
-        );
+        icons::scale(ui, &mut o.scale);
         ui.add_space(12.);
-        ui.label(RichText::new("Tip: hold Alt while dragging to skip snapping. Use the arrow keys to nudge the selected display (Shift = 10 px).").size(12.).color(MUTED));
+        ui.label(RichText::new("Orientation").size(12.).color(MUTED));
+        let flipped = o.transform.starts_with("flipped");
+        let angle = o
+            .transform
+            .trim_start_matches("flipped")
+            .trim_start_matches('-')
+            .parse::<u16>()
+            .unwrap_or(0);
+        ui.horizontal(|ui| {
+            for rotation in [0, 90, 180, 270] {
+                if icons::button(
+                    ui,
+                    Icon::Rotation(rotation),
+                    &format!("Rotate {rotation}°"),
+                    angle == rotation,
+                )
+                .clicked()
+                {
+                    o.transform = transform(rotation, flipped);
+                }
+            }
+        });
+        if icons::button(ui, Icon::Flip, "Mirror display", flipped).clicked() {
+            o.transform = transform(angle, !flipped);
+        }
         if let Err(e) = self.layout.validate() {
             ui.add_space(12.);
             ui.label(RichText::new(e.to_string()).color(COLORS[2]));
         }
     }
     fn workspaces(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            RichText::new("PUT YOUR APPS IN PLACE")
-                .size(11.)
-                .color(MUTED),
-        );
-        ui.label("Assign a workspace to a display. Its windows move together when you apply.");
-        ui.add_space(8.);
         for (i, w) in self.layout.workspaces.iter_mut().enumerate() {
             ui.label(RichText::new(format!("Workspace {}", w.name)).strong());
             egui::ComboBox::from_id_salt(("workspace", i))
@@ -457,8 +542,6 @@ impl App {
                 self.new_workspace.clear();
             }
         }
-        ui.add_space(12.);
-        ui.label(RichText::new("Future workspaces are assigned by the saved Sway include. Apply only moves workspaces that already exist.").size(12.).color(MUTED));
     }
     fn canvas(&mut self, ui: &mut egui::Ui) {
         let (rect, response) = ui.allocate_exact_size(
@@ -468,16 +551,6 @@ impl App {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 16., Color32::from_rgb(20, 25, 32));
         painter.rect_stroke(rect, 16., Stroke::new(1_f32, LINE), StrokeKind::Inside);
-        let spacing = 24.;
-        let mut x = rect.left() + 12.;
-        while x < rect.right() {
-            let mut y = rect.top() + 12.;
-            while y < rect.bottom() {
-                painter.circle_filled(Pos2::new(x, y), 1., LINE);
-                y += spacing;
-            }
-            x += spacing;
-        }
         let active: Vec<_> = self
             .layout
             .outputs
@@ -571,43 +644,29 @@ impl App {
                 StrokeKind::Inside,
             );
             let inner = r.shrink(14.);
-            if r.width() > 100. && r.height() > 80. {
+            if r.width() > 100. && r.height() > 90. {
                 painter.text(
                     inner.left_top(),
                     Align2::LEFT_TOP,
-                    format!("{:02}", i + 1),
-                    FontId::proportional(15.),
+                    &o.name,
+                    FontId::proportional(14.),
                     color,
                 );
                 painter.text(
-                    r.center() - Vec2::new(0., 13.),
-                    Align2::CENTER_CENTER,
-                    &o.name,
-                    FontId::proportional(19.),
-                    TEXT,
-                );
-                painter.text(
-                    r.center() + Vec2::new(0., 12.),
-                    Align2::CENTER_CENTER,
-                    format!("{w} × {h}  /  {}×", o.scale),
-                    FontId::proportional(12.),
+                    inner.right_top(),
+                    Align2::RIGHT_TOP,
+                    format!("{w} × {h}"),
+                    FontId::proportional(10.),
                     MUTED,
                 );
-                let workspaces = self
+                let assigned: Vec<_> = self
                     .layout
                     .workspaces
                     .iter()
                     .filter(|w| w.output == o.name)
-                    .map(|w| w.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("   ");
-                painter.text(
-                    inner.left_bottom(),
-                    Align2::LEFT_BOTTOM,
-                    format!("workspaces  {workspaces}"),
-                    FontId::proportional(11.),
-                    color,
-                );
+                    .collect();
+                let body = Rect::from_min_max(inner.min + Vec2::new(0., 28.), inner.max);
+                paint_workspaces(&painter, body, &assigned, &self.scenes, color);
             } else {
                 painter.text(
                     r.center(),
@@ -673,13 +732,6 @@ impl App {
                 o.rect.y = (o.rect.y + dy).clamp(-100000, 100000);
             }
         }
-        painter.text(
-            rect.left_bottom() + Vec2::new(16., -14.),
-            Align2::LEFT_BOTTOM,
-            "LOGICAL PIXELS  ·  ALT = FREE DRAG  ·  MIDDLE DRAG = PAN",
-            FontId::proportional(10.),
-            MUTED,
-        );
     }
 }
 impl eframe::App for App {
@@ -756,4 +808,139 @@ pub fn demo_layout() -> Layout {
             },
         ],
     )
+}
+
+pub fn transform(angle: u16, flipped: bool) -> String {
+    match (angle, flipped) {
+        (0, false) => "normal".into(),
+        (0, true) => "flipped".into(),
+        (a, true) => format!("flipped-{a}"),
+        (a, false) => a.to_string(),
+    }
+}
+fn paint_workspaces(
+    p: &egui::Painter,
+    area: Rect,
+    assigned: &[&Workspace],
+    scenes: &[live::Workspace],
+    color: Color32,
+) {
+    if assigned.is_empty() {
+        return;
+    }
+    let columns = (assigned.len() as f32).sqrt().ceil() as usize;
+    let rows = assigned.len().div_ceil(columns);
+    let gap = 8.;
+    let size = Vec2::new(
+        (area.width() - gap * (columns - 1) as f32) / columns as f32,
+        (area.height() - gap * (rows - 1) as f32) / rows as f32,
+    );
+    if size.x < 6. || size.y < 6. {
+        return;
+    }
+    for (i, w) in assigned.iter().enumerate() {
+        let tile = Rect::from_min_size(
+            area.min
+                + Vec2::new(
+                    (i % columns) as f32 * (size.x + gap),
+                    (i / columns) as f32 * (size.y + gap),
+                ),
+            size,
+        );
+        p.rect_filled(tile, 4., BG);
+        p.rect_stroke(tile, 4., Stroke::new(1_f32, LINE), StrokeKind::Inside);
+        let clip = p.with_clip_rect(tile.shrink(2.));
+        clip.text(
+            tile.min + Vec2::splat(6.),
+            Align2::LEFT_TOP,
+            &w.name,
+            FontId::proportional(10.),
+            color,
+        );
+        let viewport =
+            Rect::from_min_max(tile.min + Vec2::new(5., 23.), tile.max - Vec2::splat(5.));
+        if viewport.height() < 4. {
+            continue;
+        }
+        if let Some(scene) = scenes.iter().find(|s| s.name == w.name) {
+            let scale = (viewport.width() / scene.rect.width.max(1.))
+                .min(viewport.height() / scene.rect.height.max(1.));
+            let origin =
+                viewport.center() - Vec2::new(scene.rect.width, scene.rect.height) * scale / 2.;
+            let clip = clip.with_clip_rect(viewport);
+            for window in &scene.windows {
+                let r = Rect::from_min_size(
+                    origin
+                        + Vec2::new(window.rect.x - scene.rect.x, window.rect.y - scene.rect.y)
+                            * scale,
+                    Vec2::new(window.rect.width, window.rect.height) * scale,
+                )
+                .shrink(1.);
+                if !r.is_positive() {
+                    continue;
+                }
+                clip.rect_filled(
+                    r,
+                    2.,
+                    if window.floating {
+                        Color32::from_rgb(57, 48, 66)
+                    } else {
+                        Color32::from_rgb(40, 53, 63)
+                    },
+                );
+                clip.rect_stroke(
+                    r,
+                    2.,
+                    Stroke::new(1_f32, if window.focused { color } else { LINE }),
+                    StrokeKind::Inside,
+                );
+                if r.width() > 45. && r.height() > 16. {
+                    clip.with_clip_rect(r.shrink(3.)).text(
+                        r.center(),
+                        Align2::CENTER_CENTER,
+                        &window.title,
+                        FontId::proportional(9.),
+                        TEXT,
+                    );
+                }
+            }
+        }
+    }
+}
+fn demo_scenes() -> Vec<live::Workspace> {
+    let geometry = |x, y, width, height| live::Geometry {
+        x,
+        y,
+        width,
+        height,
+    };
+    [
+        (
+            "1: code",
+            "DP-1",
+            vec![
+                ("Editor", 0., 0., 1700., 1440.),
+                ("Terminal", 1700., 0., 860., 1440.),
+            ],
+        ),
+        ("2: web", "DP-1", vec![("Browser", 0., 0., 2560., 1440.)]),
+        ("3: chat", "eDP-1", vec![("Chat", 0., 0., 2560., 1440.)]),
+    ]
+    .into_iter()
+    .map(|(name, output, windows)| live::Workspace {
+        name: name.into(),
+        output: output.into(),
+        rect: geometry(0., 0., 2560., 1440.),
+        windows: windows
+            .into_iter()
+            .enumerate()
+            .map(|(i, (title, x, y, w, h))| live::Window {
+                title: title.into(),
+                rect: geometry(x, y, w, h),
+                focused: i == 0,
+                floating: false,
+            })
+            .collect(),
+    })
+    .collect()
 }
