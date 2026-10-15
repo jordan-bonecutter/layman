@@ -1,4 +1,6 @@
 pub mod capture;
+pub mod duplication;
+pub mod duplication_preview;
 pub mod icons;
 pub mod integration;
 pub mod ipc;

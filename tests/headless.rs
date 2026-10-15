@@ -12,6 +12,98 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[test]
+#[ignore = "requires sway, software EGL, and wl-mirror; runs its own headless compositor"]
+fn real_duplication_preview_reverts_and_confirms() -> Result<()> {
+    if !layman::duplication::available() {
+        println!("Skipping real duplication: install wl-mirror to run this check.");
+        return Ok(());
+    }
+    let sway = Sway::start()?;
+    let mut gui = sway
+        .app()
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut guard = sway
+        .app()
+        .arg("--duplication-guard")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let result = (|| -> Result<()> {
+        let wayland = fs::read_dir(&sway.runtime)?
+            .filter_map(|entry| entry.ok())
+            .find(|entry| {
+                entry.file_name().to_string_lossy().starts_with("wayland-")
+                    && !entry.file_name().to_string_lossy().ends_with(".lock")
+            })
+            .context("Wayland socket")?
+            .path();
+        let mut capture = layman::capture::Capturer::at(&wayland)?;
+        let mut reply = BufReader::new(guard.stdout.take().context("Guard stdout")?);
+        let mut request = |action: serde_json::Value, id: u64| -> Result<serde_json::Value> {
+            let input = guard.stdin.as_mut().context("Guard stdin")?;
+            writeln!(input, "{}", serde_json::json!({"id": id, "action": action}))?;
+            input.flush()?;
+            let mut line = String::new();
+            reply.read_line(&mut line)?;
+            let event: serde_json::Value = serde_json::from_str(&line)?;
+            ensure!(event["error"].is_null(), "Duplication helper: {event}");
+            ensure!(event["id"] == id, "Unexpected helper event: {event}");
+            Ok(event)
+        };
+        let wait_for_pixels =
+            |capture: &mut layman::capture::Capturer, name: &str, content: bool| -> Result<()> {
+                let started = Instant::now();
+                loop {
+                    let screens = capture.screens()?;
+                    if let Some(screen) = screens.iter().find(|screen| screen.name == name) {
+                        let colors: std::collections::HashSet<_> =
+                            screen.image.pixels.iter().collect();
+                        if (colors.len() > 20) == content {
+                            return Ok(());
+                        }
+                    }
+                    ensure!(
+                        started.elapsed() < Duration::from_secs(10),
+                        "Expected content={content} on {name}"
+                    );
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            };
+        wait_for_pixels(&mut capture, "HEADLESS-1", true)?;
+        wait_for_pixels(&mut capture, "HEADLESS-2", false)?;
+        let preview =
+            serde_json::json!({"Preview": {"source": "HEADLESS-1", "targets": ["HEADLESS-2"]}});
+        ensure!(
+            request(preview.clone(), 1)?["pending"] == true,
+            "Missing preview countdown"
+        );
+        wait_for_pixels(&mut capture, "HEADLESS-2", true)?;
+        ensure!(
+            request(serde_json::json!("Revert"), 2)?["settings"]["targets"]
+                == serde_json::json!([]),
+            "Revert retained destinations"
+        );
+        wait_for_pixels(&mut capture, "HEADLESS-2", false)?;
+        request(preview, 3)?;
+        wait_for_pixels(&mut capture, "HEADLESS-2", true)?;
+        ensure!(
+            request(serde_json::json!("Keep"), 4)?["pending"] == false,
+            "Confirmation retained deadline"
+        );
+        wait_for_pixels(&mut capture, "HEADLESS-2", true)?;
+        println!("✓ real wl-mirror captures the source; Revert removes it and Confirm keeps it");
+        Ok(())
+    })();
+    guard.stdin.take();
+    let _ = guard.wait();
+    let _ = gui.kill();
+    let _ = gui.wait();
+    result
+}
+
 struct Sway {
     child: Child,
     dir: tempfile::TempDir,

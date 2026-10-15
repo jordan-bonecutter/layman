@@ -43,6 +43,9 @@ fn run() -> Result<()> {
         Some("--guard") if args.len() == 2 => {
             return preview::guard(std::path::Path::new(&args[1]));
         }
+        Some("--duplication-guard") if args.len() == 1 => {
+            return layman::duplication_preview::guard();
+        }
         Some("--demo") if args.len() == 1 => {}
         None => {}
         _ => bail!("Unknown arguments. Use --help."),

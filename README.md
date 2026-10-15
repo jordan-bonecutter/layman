@@ -39,8 +39,25 @@ Run it again after moving the binary to update the entry.
 Drag monitors to match your desk. Edges snap; Alt bypasses snapping. Select a
 monitor to edit its advertised resolution/refresh and fractional scale. The scale
 slider snaps to 0.25× increments; focus it and use the arrow keys for precise changes.
-Four orientation icons select 0°, 90°, 180°, or 270°; the Mirror switch flips
-horizontally.
+Four orientation icons select 0°, 90°, 180°, or 270°.
+
+For presentations, install [`wl-mirror`](https://github.com/Ferdi265/wl-mirror).
+It is a separate dependency, not bundled with Sway. Duplication is disabled when
+`wl-mirror` is missing from your PATH; the editor detects it after installation.
+Select the source display and click **Duplicate this display**, click the destination
+screens on the canvas, then click **Done** to preview duplication for 20 seconds.
+Choose **Confirm duplication** to keep it. **Revert duplication**, Escape, or the
+timeout restores the previous source and destinations (or stops duplication if
+there was no previous session). An independent helper enforces the timeout even
+if the editor freezes; closing or crashing the editor ends all its mirror windows.
+Capture failures during a preview also restore the previous session.
+While selecting destinations, click one again to deselect it; Cancel or Escape
+discards the selection. Reopen the same source to change destinations. Each destination
+gets a fullscreen mirror scaled to fit. Keep Layman open while presenting: closing
+it or previewing new output settings ends duplication. **Stop duplication** ends
+the session immediately.
+Presentation sessions are not saved with layouts.
+Demo mode lets you explore the selection without launching mirror windows.
 Arrow keys over the canvas nudge the selected monitor; Shift nudges by 10 pixels.
 Scroll over the canvas to zoom around the pointer. Drag empty canvas to pan, or
 hold Space and drag anywhere (middle-drag also works). Dragging screen pixels
@@ -133,7 +150,9 @@ cargo test --locked
 cargo test --locked --test headless -- --ignored --nocapture
 ```
 
-The headless test needs `sway`, `grim`, and Mesa software EGL/OpenGL. It starts
+The headless tests need `sway`, `grim`, and Mesa software EGL/OpenGL. The additional
+duplication test runs when `wl-mirror` is installed and checks real mirrored pixels,
+Revert, and Confirm in an isolated compositor. The layout test starts
 its **own** two-output compositor with a private runtime directory and IPC
 socket, isolates configuration writes, renders the actual native UI, captures
 `artifacts/headless-ui.png` and `headless-preview.png`, tests dragging and
@@ -142,8 +161,9 @@ with a live Wayland window, tests the save dialog's config diff and Apply button
 checks real screen capture and output re-enabling, exercises Refresh after external
 layout changes, checks save/reload, and waits out the real 20-second rollback deadline. It
 never sends commands to your desktop session. Ordinary tests cover IPC framing,
-validation, device matching, logical dimensions/snapping, persistence, and UI
-rendering without a display server. CI runs both suites.
+validation, device matching, logical dimensions/snapping, persistence, UI rendering,
+and the independent duplication helper's real 20-second timeout, restoration, and
+process cleanup without a display server. CI runs both suites.
 
 Protocol and behavior references: [Sway IPC](https://github.com/swaywm/sway/blob/master/sway/sway-ipc.7.scd),
 [output commands](https://github.com/swaywm/sway/blob/master/sway/sway-output.5.scd),

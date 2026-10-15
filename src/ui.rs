@@ -77,7 +77,28 @@ fn preview_mesh(texture: &ScreenTexture, rect: Rect, draft: &str) -> egui::Mesh 
     mesh
 }
 
+fn toggle_target(targets: &mut Vec<String>, name: &str) {
+    if let Some(index) = targets.iter().position(|target| target == name) {
+        targets.remove(index);
+    } else {
+        targets.push(name.into());
+    }
+}
+
+#[derive(Clone)]
+struct DuplicateSelection {
+    source: String,
+    targets: Vec<String>,
+}
+
 pub struct App {
+    mirror_available: bool,
+    mirror_checked: std::time::Instant,
+    duplication: crate::duplication_preview::Preview,
+    demo_duplicate_before: Option<DuplicateSelection>,
+    demo_duplicate_started: Option<std::time::Instant>,
+    duplicate_selection: Option<DuplicateSelection>,
+    demo_duplication: Option<DuplicateSelection>,
     layout: Layout,
     baseline: Layout,
     selected: usize,
@@ -145,6 +166,13 @@ impl App {
             ipc::snapshot()?
         };
         Ok(Self {
+            mirror_available: crate::duplication::available(),
+            mirror_checked: std::time::Instant::now(),
+            duplication: Default::default(),
+            demo_duplicate_before: None,
+            demo_duplicate_started: None,
+            duplicate_selection: None,
+            demo_duplication: None,
             baseline: layout.clone(),
             layout,
             selected: 0,
@@ -214,6 +242,11 @@ impl App {
         self.pan_drag = None;
     }
     fn preview(&mut self) {
+        if let Err(error) = self.duplication.stop() {
+            self.status = format!("{error:#}");
+            return;
+        }
+        self.duplicate_selection = None;
         match Preview::start(&self.layout) {
             Ok(p) => {
                 self.preview = Some(p);
@@ -299,6 +332,7 @@ impl App {
                         .iter()
                         .position(|o| Some(&o.name) == selected.as_ref())
                         .unwrap_or(0);
+                    self.duplicate_selection = None;
                     self.layout = layout.clone();
                     self.baseline = layout;
                     self.drag = None;
@@ -311,7 +345,30 @@ impl App {
         }
     }
     pub fn draw(&mut self, ctx: &egui::Context) {
+        if self.mirror_checked.elapsed() >= std::time::Duration::from_secs(2) {
+            self.mirror_available = crate::duplication::available();
+            self.mirror_checked = std::time::Instant::now();
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(2));
         self.read_live(ctx);
+        if let Some(message) = self.duplication.poll() {
+            self.status = message;
+        }
+        if !self.duplication.source.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        if self
+            .demo_duplicate_started
+            .is_some_and(|started| started.elapsed().as_secs() >= crate::preview::SECONDS)
+        {
+            self.finish_duplication(false);
+        }
+        if self.duplication_pending() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.finish_duplication(false);
+            }
+        }
         if self.preview.as_ref().is_some_and(|p| p.remaining() == 0) {
             self.finish(false);
         }
@@ -338,38 +395,43 @@ impl App {
                     Stroke::new(1.5_f32, ACCENT),
                 );
                 ui.add_space(6.);
-                ui.add_enabled_ui(self.preview.is_none(), |ui| {
-                    ui.horizontal(|ui| {
-                        if icons::button(ui, Icon::Row, "Arrange in a row", false).clicked() {
-                            self.layout.horizontal();
-                            self.fit();
-                        }
-                        if icons::button(ui, Icon::Fit, "Fit displays", false).clicked() {
-                            self.fit();
-                        }
-                        if icons::button(
-                            ui,
-                            Icon::Snap,
-                            "Snap display edges · Alt bypasses",
-                            self.snapping,
-                        )
-                        .clicked()
-                        {
-                            self.snapping = !self.snapping;
-                        }
-                        if icons::enabled_button(
-                            ui,
-                            Icon::Refresh,
-                            "Refresh displays from Sway",
-                            self.refresh_receiver.is_some(),
-                            !self.demo && self.refresh_receiver.is_none(),
-                        )
-                        .clicked()
-                        {
-                            self.refresh(ctx);
-                        }
-                    });
-                });
+                ui.add_enabled_ui(
+                    self.preview.is_none()
+                        && !self.duplication_pending()
+                        && self.duplicate_selection.is_none(),
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            if icons::button(ui, Icon::Row, "Arrange in a row", false).clicked() {
+                                self.layout.horizontal();
+                                self.fit();
+                            }
+                            if icons::button(ui, Icon::Fit, "Fit displays", false).clicked() {
+                                self.fit();
+                            }
+                            if icons::button(
+                                ui,
+                                Icon::Snap,
+                                "Snap display edges · Alt bypasses",
+                                self.snapping,
+                            )
+                            .clicked()
+                            {
+                                self.snapping = !self.snapping;
+                            }
+                            if icons::enabled_button(
+                                ui,
+                                Icon::Refresh,
+                                "Refresh displays from Sway",
+                                self.refresh_receiver.is_some(),
+                                !self.demo && self.refresh_receiver.is_none(),
+                            )
+                            .clicked()
+                            {
+                                self.refresh(ctx);
+                            }
+                        });
+                    },
+                );
             });
         egui::TopBottomPanel::bottom("footer")
             .frame(egui::Frame::new().fill(PANEL).inner_margin(16.))
@@ -381,12 +443,27 @@ impl App {
                                 .monospace()
                                 .color(ACCENT),
                         );
+                    } else if self.duplication_pending() {
+                        ui.label(
+                            RichText::new(format!(
+                                "{}s · Keep this duplication?",
+                                self.duplication_remaining()
+                            ))
+                            .color(ACCENT),
+                        );
                     } else if !self.status.is_empty() {
                         ui.label(RichText::new(&self.status).size(12.).color(WARN));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 12.;
-                        if self.preview.is_some() {
+                        if self.duplication_pending() {
+                            if ui.button("Confirm duplication").clicked() {
+                                self.finish_duplication(true);
+                            }
+                            if ui.button("Revert duplication").clicked() {
+                                self.finish_duplication(false);
+                            }
+                        } else if self.preview.is_some() {
                             if icons::button(ui, Icon::Confirm, "Confirm & save", true).clicked() {
                                 self.finish(true);
                             }
@@ -399,13 +476,16 @@ impl App {
                                 Icon::Save,
                                 "Save layout · confirm within 20 seconds",
                                 true,
-                                !self.demo && self.refresh_receiver.is_none(),
+                                !self.demo
+                                    && self.refresh_receiver.is_none()
+                                    && self.duplicate_selection.is_none(),
                             )
                             .clicked()
                             {
                                 self.preview();
                             }
                             if icons::button(ui, Icon::Reset, "Reset edits", false).clicked() {
+                                self.duplicate_selection = None;
                                 self.layout = self.baseline.clone();
                                 self.selected = 0;
                                 self.drag = None;
@@ -432,34 +512,43 @@ impl App {
             .resizable(false)
             .frame(egui::Frame::new().fill(PANEL).inner_margin(22.))
             .show(ctx, |ui| {
-                ui.add_enabled_ui(self.preview.is_none(), |ui| {
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.tab, 0, "Display");
-                        ui.selectable_value(&mut self.tab, 1, "Workspaces");
-                    });
-                    ui.add_space(14.);
-                    ui.spacing_mut().item_spacing.y = 7.;
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        if self.tab == 0 {
-                            self.inspector(ui);
-                        } else {
-                            self.workspaces(ui);
-                        }
-                    });
-                });
+                ui.add_enabled_ui(
+                    self.preview.is_none()
+                        && !self.duplication_pending()
+                        && self.duplicate_selection.is_none(),
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut self.tab, 0, "Display");
+                            ui.selectable_value(&mut self.tab, 1, "Workspaces");
+                        });
+                        ui.add_space(14.);
+                        ui.spacing_mut().item_spacing.y = 7.;
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            if self.tab == 0 {
+                                self.inspector(ui);
+                            } else {
+                                self.workspaces(ui);
+                            }
+                        });
+                    },
+                );
             });
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG).inner_margin(24.))
             .show(ctx, |ui| {
-                ui.add_enabled_ui(self.preview.is_none(), |ui| {
-                    for warning in self.layout.warnings() {
-                        ui.label(RichText::new(warning).size(12.).color(WARN));
-                    }
-                    if let Some(error) = &self.live_error {
-                        ui.label(RichText::new(error).size(12.).color(WARN));
-                    }
-                    self.canvas(ui);
-                });
+                ui.add_enabled_ui(
+                    self.preview.is_none() && !self.duplication_pending(),
+                    |ui| {
+                        self.duplication_controls(ui);
+                        for warning in self.layout.warnings() {
+                            ui.label(RichText::new(warning).size(12.).color(WARN));
+                        }
+                        if let Some(error) = &self.live_error {
+                            ui.label(RichText::new(error).size(12.).color(WARN));
+                        }
+                        self.canvas(ui);
+                    },
+                );
             });
         if self.help {
             self.save_dialog(ctx);
@@ -535,7 +624,102 @@ impl App {
             });
         self.help = open && !close;
     }
+    fn duplication_pending(&self) -> bool {
+        self.demo_duplicate_started.is_some() || self.duplication.pending()
+    }
+    fn duplication_remaining(&self) -> u64 {
+        if let Some(started) = self.demo_duplicate_started {
+            crate::preview::SECONDS.saturating_sub(started.elapsed().as_secs())
+        } else {
+            self.duplication.remaining()
+        }
+    }
+    fn finish_duplication(&mut self, keep: bool) {
+        let result = if self.demo {
+            if !keep {
+                self.demo_duplication = self.demo_duplicate_before.take();
+            }
+            self.demo_duplicate_before = None;
+            self.demo_duplicate_started = None;
+            Ok(())
+        } else {
+            self.duplication.finish(keep)
+        };
+        self.message(
+            result,
+            if keep {
+                "Duplication confirmed · Closing Layman ends the presentation"
+            } else {
+                "Previous duplication restored."
+            },
+        );
+    }
+    fn duplication_controls(&mut self, ui: &mut egui::Ui) {
+        let Some(selection) = &self.duplicate_selection else {
+            return;
+        };
+        ui.label(format!(
+            "Duplicate {} · Select destination screens",
+            selection.source
+        ));
+        let mut done = false;
+        let mut cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        let available = self.demo || self.mirror_available || selection.targets.is_empty();
+        ui.horizontal(|ui| {
+            done = ui
+                .add_enabled(available, egui::Button::new("Done"))
+                .clicked();
+            cancel |= ui.button("Cancel").clicked();
+        });
+        if !available {
+            ui.label("Requires wl-mirror. Install it to enable screen duplication.");
+        }
+        if cancel {
+            self.duplicate_selection = None;
+        } else if done {
+            let selection = self.duplicate_selection.as_ref().unwrap();
+            let names: Vec<_> = std::iter::once(&selection.source)
+                .chain(selection.targets.iter())
+                .collect();
+            if !names.iter().all(|name| {
+                self.baseline
+                    .outputs
+                    .iter()
+                    .any(|o| o.active && &o.name == *name)
+            }) {
+                self.status =
+                    "Apply display settings before duplicating newly enabled screens.".into();
+                return;
+            }
+            if self.demo {
+                self.demo_duplicate_before = self.demo_duplication.clone();
+                self.demo_duplicate_started = Some(std::time::Instant::now());
+                self.demo_duplication = self
+                    .duplicate_selection
+                    .take()
+                    .filter(|s| !s.targets.is_empty());
+                self.status = "Demo duplication preview · confirm within 20 seconds".into();
+            } else {
+                match self
+                    .duplication
+                    .start(&selection.source, &selection.targets)
+                {
+                    Ok(()) => {
+                        self.duplicate_selection = None;
+                        self.status = "Duplication preview · confirm within 20 seconds".into();
+                    }
+                    Err(error) => self.status = format!("{error:#}"),
+                }
+            }
+        }
+    }
     fn inspector(&mut self, ui: &mut egui::Ui) {
+        if let Some(selection) = &self.duplicate_selection {
+            ui.label(RichText::new("Duplicate display").size(23.).strong());
+            ui.label(format!("Source: {}", selection.source));
+            ui.label("Click destination screens on the canvas. Click again to deselect, then choose Done.");
+            return;
+        }
         ui.label(RichText::new("DISPLAYS").size(11.).color(MUTED));
         for (i, o) in self.layout.outputs.iter_mut().enumerate() {
             egui::Frame::new()
@@ -631,10 +815,50 @@ impl App {
             }
         });
         ui.add_space(12.);
-        let mut mirrored = flipped;
-        ui.label(RichText::new("Mirror").size(12.).color(MUTED));
-        if icons::switch(ui, &mut mirrored, "Mirror display").changed() {
-            o.transform = transform(angle, mirrored);
+        if ui
+            .add_enabled(
+                o.active && self.refresh_receiver.is_none() && (self.demo || self.mirror_available),
+                egui::Button::new("Duplicate this display"),
+            )
+            .clicked()
+        {
+            let source = o.name.clone();
+            let targets = if self.demo {
+                self.demo_duplication
+                    .as_ref()
+                    .filter(|s| s.source == source)
+                    .map(|s| s.targets.clone())
+                    .unwrap_or_default()
+            } else if self.duplication.source == source {
+                self.duplication.targets()
+            } else {
+                Vec::new()
+            };
+            self.duplicate_selection = Some(DuplicateSelection { source, targets });
+            self.drag = None;
+        }
+        if !self.mirror_available {
+            ui.label(
+                RichText::new(if self.demo {
+                    "Demo only. Install wl-mirror to duplicate real displays."
+                } else {
+                    "Requires wl-mirror. Install it to enable screen duplication."
+                })
+                .size(12.)
+                .color(MUTED),
+            );
+        }
+        let running = if self.demo {
+            self.demo_duplication.is_some()
+        } else {
+            !self.duplication.source.is_empty()
+        };
+        if running && ui.button("Stop duplication").clicked() {
+            let result = self.duplication.stop();
+            self.demo_duplication = None;
+            self.demo_duplicate_before = None;
+            self.demo_duplicate_started = None;
+            self.message(result, "Duplication stopped.");
         }
         if let Err(e) = self.layout.validate() {
             ui.add_space(12.);
@@ -773,14 +997,22 @@ impl App {
             let interaction = ui.interact(
                 r.intersect(rect),
                 ui.id().with(("monitor", i)),
-                if pan_gesture {
+                if self.duplicate_selection.is_some() {
+                    Sense::click()
+                } else if pan_gesture {
                     Sense::hover()
                 } else {
                     Sense::click_and_drag()
                 },
             );
             if interaction.clicked() {
-                self.selected = i;
+                if let Some(selection) = &mut self.duplicate_selection {
+                    if selection.source != o.name {
+                        toggle_target(&mut selection.targets, &o.name);
+                    }
+                } else {
+                    self.selected = i;
+                }
             }
             if interaction.drag_started_by(egui::PointerButton::Primary) {
                 self.selected = i;
@@ -795,7 +1027,12 @@ impl App {
                 });
             }
             if interaction.hovered() || interaction.dragged() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                ui.ctx()
+                    .set_cursor_icon(if self.duplicate_selection.is_some() {
+                        egui::CursorIcon::PointingHand
+                    } else {
+                        egui::CursorIcon::Grab
+                    });
             }
             // Keep the border inside its own display so touching monitors never cover each other.
             painter.rect_filled(r, 0., PANEL);
@@ -814,6 +1051,31 @@ impl App {
                     MUTED,
                 );
             }
+            let duplication_label = self.duplicate_selection.as_ref().map(|selection| {
+                if selection.source == o.name {
+                    "Source"
+                } else if selection.targets.contains(&o.name) {
+                    "✓ Duplicate here"
+                } else {
+                    "Click to duplicate here"
+                }
+            });
+            if let Some(label) = duplication_label {
+                let badge = Rect::from_center_size(r.center(), Vec2::new(r.width().min(180.), 30.));
+                painter.rect_filled(badge, 4., PANEL);
+                painter.text(
+                    badge.center(),
+                    Align2::CENTER_CENTER,
+                    label,
+                    FontId::proportional(12.),
+                    ACCENT,
+                );
+            }
+            let selected = selected
+                || self
+                    .duplicate_selection
+                    .as_ref()
+                    .is_some_and(|s| s.targets.contains(&o.name));
             painter.rect_stroke(
                 r,
                 0.,
@@ -893,7 +1155,10 @@ impl App {
         } else if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
-        if response.hovered() && !ui.ctx().wants_keyboard_input() {
+        if self.duplicate_selection.is_none()
+            && response.hovered()
+            && !ui.ctx().wants_keyboard_input()
+        {
             let (dx, dy) = ui.input(|i| {
                 let step = if i.modifiers.shift { 10 } else { 1 };
                 (
@@ -1000,6 +1265,215 @@ pub fn transform(angle: u16, flipped: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn frame(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280., 800.))),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.draw(ctx),
+        )
+    }
+
+    fn text_position(output: &egui::FullOutput, text: &str) -> Pos2 {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::Shape::Text(shape) = &shape.shape {
+                    (shape.galley.text() == text).then_some(shape.pos + shape.galley.size() / 2.)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("Missing UI text: {text}"))
+    }
+
+    fn click(app: &mut App, ctx: &egui::Context, pos: Pos2) -> egui::FullOutput {
+        frame(
+            app,
+            ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        frame(
+            app,
+            ctx,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        )
+    }
+
+    #[test]
+    fn missing_wl_mirror_disables_duplication_and_explains_requirement() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, true).unwrap();
+        app.demo = false;
+        app.mirror_available = false;
+        frame(&mut app, &ctx, vec![]);
+        let output = frame(&mut app, &ctx, vec![]);
+        text_position(
+            &output,
+            "Requires wl-mirror. Install it to enable screen duplication.",
+        );
+        click(
+            &mut app,
+            &ctx,
+            text_position(&output, "Duplicate this display"),
+        );
+        assert!(app.duplicate_selection.is_none());
+        app.mirror_available = true;
+        let output = frame(&mut app, &ctx, vec![]);
+        click(
+            &mut app,
+            &ctx,
+            text_position(&output, "Duplicate this display"),
+        );
+        assert!(app.duplicate_selection.is_some());
+    }
+
+    #[test]
+    fn duplication_selects_destinations_without_moving_screens_and_done_starts_demo() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, true).unwrap();
+        let original = serde_json::to_string(&app.layout).unwrap();
+        frame(&mut app, &ctx, vec![]);
+        let output = frame(&mut app, &ctx, vec![]);
+        let button = text_position(&output, "Duplicate this display");
+        click(&mut app, &ctx, button);
+        let output = frame(&mut app, &ctx, vec![]);
+        let source = text_position(&output, "Source");
+        click(&mut app, &ctx, source);
+        assert!(app.duplicate_selection.as_ref().unwrap().targets.is_empty());
+        let output = frame(&mut app, &ctx, vec![]);
+        let target = text_position(&output, "Click to duplicate here");
+        click(&mut app, &ctx, target);
+        assert_eq!(app.duplicate_selection.as_ref().unwrap().targets, ["eDP-1"]);
+        click(&mut app, &ctx, target);
+        assert!(app.duplicate_selection.as_ref().unwrap().targets.is_empty());
+        click(&mut app, &ctx, target);
+        let output = frame(&mut app, &ctx, vec![]);
+        click(&mut app, &ctx, text_position(&output, "Done"));
+        assert!(app.duplicate_selection.is_none());
+        assert_eq!(app.demo_duplication.as_ref().unwrap().targets, ["eDP-1"]);
+        assert!(app.drag.is_none());
+        assert_eq!(serde_json::to_string(&app.layout).unwrap(), original);
+        assert!(app.duplication_pending());
+        let output = frame(&mut app, &ctx, vec![]);
+        click(
+            &mut app,
+            &ctx,
+            text_position(&output, "Confirm duplication"),
+        );
+        assert!(!app.duplication_pending());
+        let output = frame(&mut app, &ctx, vec![]);
+        click(
+            &mut app,
+            &ctx,
+            text_position(&output, "Duplicate this display"),
+        );
+        assert_eq!(app.duplicate_selection.as_ref().unwrap().targets, ["eDP-1"]);
+        let output = frame(&mut app, &ctx, vec![]);
+        click(&mut app, &ctx, text_position(&output, "Cancel"));
+        assert!(app.duplicate_selection.is_none());
+        assert!(app.demo_duplication.is_some());
+        let output = frame(&mut app, &ctx, vec![]);
+        click(&mut app, &ctx, text_position(&output, "Stop duplication"));
+        assert!(app.demo_duplication.is_none());
+    }
+
+    #[test]
+    fn duplication_revert_timeout_and_escape_restore_the_previous_demo_session() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, true).unwrap();
+        frame(&mut app, &ctx, vec![]);
+        let output = frame(&mut app, &ctx, vec![]);
+        click(
+            &mut app,
+            &ctx,
+            text_position(&output, "Duplicate this display"),
+        );
+        let output = frame(&mut app, &ctx, vec![]);
+        click(
+            &mut app,
+            &ctx,
+            text_position(&output, "Click to duplicate here"),
+        );
+        let output = frame(&mut app, &ctx, vec![]);
+        click(&mut app, &ctx, text_position(&output, "Done"));
+        let output = frame(&mut app, &ctx, vec![]);
+        click(&mut app, &ctx, text_position(&output, "Revert duplication"));
+        assert!(app.demo_duplication.is_none());
+        assert!(!app.duplication_pending());
+
+        // A confirmed session is restored when a preview removing its targets expires.
+        app.demo_duplication = Some(DuplicateSelection {
+            source: "DP-1".into(),
+            targets: vec!["eDP-1".into()],
+        });
+        let output = frame(&mut app, &ctx, vec![]);
+        click(
+            &mut app,
+            &ctx,
+            text_position(&output, "Duplicate this display"),
+        );
+        let output = frame(&mut app, &ctx, vec![]);
+        click(&mut app, &ctx, text_position(&output, "✓ Duplicate here"));
+        let output = frame(&mut app, &ctx, vec![]);
+        click(&mut app, &ctx, text_position(&output, "Done"));
+        assert!(app.demo_duplication.is_none());
+        assert!(app.duplication_pending());
+        app.demo_duplicate_started = Some(
+            std::time::Instant::now() - std::time::Duration::from_secs(crate::preview::SECONDS),
+        );
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.demo_duplication.as_ref().unwrap().targets, ["eDP-1"]);
+        assert!(!app.duplication_pending());
+
+        // Escape also reverts a source change.
+        app.selected = 1;
+        let output = frame(&mut app, &ctx, vec![]);
+        click(
+            &mut app,
+            &ctx,
+            text_position(&output, "Duplicate this display"),
+        );
+        let output = frame(&mut app, &ctx, vec![]);
+        click(
+            &mut app,
+            &ctx,
+            text_position(&output, "Click to duplicate here"),
+        );
+        let output = frame(&mut app, &ctx, vec![]);
+        click(&mut app, &ctx, text_position(&output, "Done"));
+        assert_eq!(app.demo_duplication.as_ref().unwrap().source, "eDP-1");
+        frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(app.demo_duplication.as_ref().unwrap().source, "DP-1");
+        assert!(!app.duplication_pending());
+    }
+
     #[test]
     fn grabbing_background_or_middle_dragging_a_screen_pans_without_moving_displays() {
         for (button, start) in [
